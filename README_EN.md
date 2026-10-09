@@ -40,6 +40,7 @@ Nothing has to be installed: Windows 10/11 is enough, and the project is built w
 - Text and voice chat: 16 kHz IMA ADPCM, voice activity detection, automatic gain, mixing of several speakers, speaking indicators.
 - Queued move (premove), hint, review of earlier positions, move animation, sounds.
 - Dark and light themes, 4 board styles, DPI scaling.
+- The game version is shown in the window title and under the buttons; when a newer version is released on GitHub, a "… available — update" line appears there (click it and the game offers to open the download page; it never downloads anything itself).
 - No dependencies: only .NET Framework 4.8, which Windows 10/11 already has.
 
 ## 🏗️ How it works
@@ -135,6 +136,8 @@ Chess-WinForms/
 │   ├── LanRoomTransport.cs               # TCP hub, discovery, hub relocation
 │   ├── SteamRoomTransport.cs             # a room on top of a Steam lobby
 │   ├── SteamLobbyService.cs, SteamLink.cs # Steam API without the SDK: DLL loading and lobbies
+│   ├── SteamDllStamp.cs                  # fingerprint of the Steam DLL: notice that Steam changed it
+│   ├── AppInfo.cs, UpdateChecker.cs      # the game version and the check for a newer one on GitHub
 │   ├── Voice.cs                          # microphone, codec, mixer, speaker
 │   ├── MainForm*.cs                      # window, network game, chat, "People" tab
 │   ├── BoardControl.cs, PlayerBar.cs, ChatControl.cs, PeopleList.cs, ...
@@ -153,6 +156,8 @@ Chess-WinForms/
 - When the host role is handed over on a LAN, the new host receives the members' service keys (the room recognises returning people by them). Hand the role over to people you trust.
 - Everybody in the room hears the microphone. Invite people you trust.
 - For the Steam mode the game loads only a `steam_api64.dll` signed by Valve and checks that it exports the functions it needs.
+- The game remembers which `steam_api64.dll` it used (path, size, version, hash). If Steam updated or removed that file, it is checked again like any other; a file that loaded but did not work is skipped until Steam replaces it with a different build.
+- Every few hours the game makes one request to `api.github.com` (the latest release) to learn about a new version. To switch it off, put `updates=0` into `%APPDATA%\ChessGame\settings.ini`.
 
 ## ⚠️ Limitations
 

@@ -189,6 +189,9 @@ static class NetTests
             return;
         }
         Console.WriteLine("  steam_api64.dll: " + SteamNative.LoadedFrom);
+        Check(SteamNative.ChangeNote == null, "first run in a clean settings store: nothing to compare with (" + SteamNative.ChangeNote + ")");
+        SteamDllStamp remembered = SteamDllMemory.Recall();
+        Check(remembered != null && remembered.SameContent(SteamDllStamp.Of(SteamNative.LoadedFrom)), "the DLL that was loaded is remembered for the next start");
         IntPtr module = GetModuleHandle("steam_api64.dll");
         Check(module != IntPtr.Zero, "the DLL is loaded under its own name (so DllImport finds it)");
 
@@ -233,6 +236,167 @@ static class NetTests
         Check(System.IO.File.Exists(exeFile) && System.IO.File.ReadAllText(exeFile).Trim() == "480", "steam_appid.txt (480) written next to the exe");
         if (!hadCwd) try { System.IO.File.Delete(cwdFile); } catch (Exception) { }
         if (!hadExe) try { System.IO.File.Delete(exeFile); } catch (Exception) { }
+    }
+
+    /// <summary>Steam replaces steam_api64.dll when it updates a game or itself: the game must notice and not trust the old assumptions.</summary>
+    static void TestSteamDllWatch()
+    {
+        Console.WriteLine("Steam DLL: noticing that Steam changed it");
+        string dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "chess-dll-" + Guid.NewGuid().ToString("N"));
+        System.IO.Directory.CreateDirectory(dir);
+        try
+        {
+            string a = System.IO.Path.Combine(dir, "steam_api64.dll");
+            System.IO.File.WriteAllBytes(a, new byte[] { 1, 2, 3, 4 });
+            SteamDllStamp s1 = SteamDllStamp.Of(a);
+            Check(s1 != null && s1.Size == 4 && s1.Hash.Length == 16, "a stamp of an existing file");
+            Check(SteamDllStamp.Of(System.IO.Path.Combine(dir, "none.dll")) == null, "no stamp for a missing file");
+            Check(SteamDllMemory.DescribeChange(s1, SteamDllStamp.Of(a)) == null, "the same file is not a change");
+            Check(SteamDllMemory.DescribeChange(null, s1) == null, "no earlier run: nothing to report");
+
+            SteamDllStamp back = SteamDllStamp.Parse(s1.Serialize());
+            Check(back != null && back.SameContent(s1) && back.SamePlace(s1) && back.Version == s1.Version, "a stamp survives the settings file");
+            Check(SteamDllStamp.Parse("garbage") == null && SteamDllStamp.Parse("") == null && SteamDllStamp.Parse("a|b|c|d") == null, "garbage is not a stamp");
+
+            // the DLL is replaced in place
+            System.IO.File.WriteAllBytes(a, new byte[] { 1, 2, 3, 4, 5 });
+            SteamDllStamp s2 = SteamDllStamp.Of(a);
+            string note = SteamDllMemory.DescribeChange(s1, s2);
+            Check(!s1.SameContent(s2) && note != null && note.Contains("обновился"), "a DLL updated in place is reported: " + note);
+            System.IO.File.WriteAllBytes(a, new byte[] { 9, 9, 9, 9, 9 });
+            Check(!s2.SameContent(SteamDllStamp.Of(a)), "the same size with other bytes is still a change");
+            string lostNote = SteamDllMemory.DescribeLostFile(s1, SteamDllStamp.Of(a));
+            Check(lostNote != null && lostNote.Contains("изменился"), "a changed file is named when nothing usable is left: " + lostNote);
+
+            // the same bytes in another folder, and the old file gone
+            string other = System.IO.Path.Combine(dir, "other");
+            System.IO.Directory.CreateDirectory(other);
+            string b = System.IO.Path.Combine(other, "steam_api64.dll");
+            System.IO.File.Copy(a, b);
+            SteamDllStamp sa = SteamDllStamp.Of(a), sb = SteamDllStamp.Of(b);
+            note = SteamDllMemory.DescribeChange(sa, sb);
+            Check(sa.SameContent(sb) && !sa.SamePlace(sb) && note != null && note.Contains("другой папки"), "the same DLL from another folder: " + note);
+            System.IO.File.WriteAllBytes(b, new byte[] { 7 });
+            sb = SteamDllStamp.Of(b);
+            System.IO.File.Delete(a);
+            note = SteamDllMemory.DescribeChange(sa, sb);
+            Check(note != null && note.Contains("пропал"), "the old file is gone, another one is used: " + note);
+            Check(SteamDllMemory.DescribeLostFile(sa, SteamDllStamp.Of(a)).Contains("пропал"), "a vanished file is named when nothing usable is left");
+            Check(SteamDllMemory.DescribeLostFile(sb, SteamDllStamp.Of(b)) == null, "an unchanged file is not blamed");
+
+            // a build that was loaded but failed in use is skipped until its content changes
+            Check(!SteamDllMemory.AnyBad && !SteamDllMemory.IsBad(sa), "nothing is marked bad at first");
+            SteamDllMemory.MarkBad(sa);
+            Check(SteamDllMemory.AnyBad && SteamDllMemory.IsBad(sa), "a failed build is remembered");
+            Check(!SteamDllMemory.IsBad(sb), "a different build is not affected");
+            SteamDllMemory.Remember(sb);
+            SteamDllMemory.MarkBad(sb);
+            Check(SteamDllMemory.Recall() == null, "a failed build is not kept as 'the one that worked'");
+            for (int i = 0; i < 20; i++)
+            {
+                System.IO.File.WriteAllBytes(b, new byte[] { 1, (byte)i, 0, 0 });
+                SteamDllMemory.MarkBad(SteamDllStamp.Of(b));
+            }
+            Check(Settings.Get("steam.dll.bad", "").Split(',').Length <= 8, "the list of failed builds stays short");
+        }
+        finally
+        {
+            Settings.Set("steam.dll", "");
+            Settings.Set("steam.dll.bad", "");
+            try { System.IO.Directory.Delete(dir, true); } catch (Exception) { }
+        }
+    }
+
+    static void TestUpdateChecker()
+    {
+        Console.WriteLine("version and update notice");
+        Version cur = new Version(1, 1, 0);
+        UpdateInfo i = UpdateChecker.Parse("{\"url\":\"x\",\"tag_name\":\"v1.2.0\",\"name\":\"Chess 1.2.0\"}", cur);
+        Check(i != null && i.IsNewer && i.LatestText == "1.2.0", "a higher tag is a newer release");
+        Check(i != null && i.Url == "https://github.com/soroka01/Chess-WinForms/releases/tag/v1.2.0", "the notice points at the release page");
+        Check(!UpdateChecker.Parse("{\"tag_name\":\"v1.1.0\"}", cur).IsNewer, "the same version is not newer");
+        Check(!UpdateChecker.Parse("{\"tag_name\":\"v1.0.0\"}", cur).IsNewer, "an older version is not newer");
+        Check(!UpdateChecker.Parse("{\"tag_name\":\"v1.1\"}", cur).IsNewer, "1.1 and 1.1.0 are the same version");
+        Check(UpdateChecker.Parse("{\"tag_name\":\"1.1.1\"}", cur).IsNewer, "a tag without 'v' works");
+        Check(UpdateChecker.Parse("{\"tag_name\":\"v1.10.0\"}", new Version(1, 9, 0)).IsNewer, "1.10 is newer than 1.9 (numbers, not text)");
+        Check(UpdateChecker.Parse("{\"tag_name\":\"nightly\"}", cur) == null, "a tag that is not a version is ignored");
+        Check(UpdateChecker.Parse("{\"tag_name\":\"v1.2.0&calc\"}", cur) == null, "nothing but digits and dots gets into the address");
+        Check(UpdateChecker.Parse("<html>rate limited</html>", cur) == null && UpdateChecker.Parse("", cur) == null && UpdateChecker.Parse(null, cur) == null,
+            "an answer that is not a release gives no notice");
+        Check(UpdateChecker.Current.ToString() == AppInfo.Version + ".0", "the current version comes from AppInfo");
+        Check(typeof(MainForm).Assembly.GetName().Version.ToString() == AppInfo.Version + ".0", "the version of the program file follows AppInfo");
+
+        // the lookup is made every few hours, and what it found is kept between runs
+        Settings.Set("update.at", "");
+        Settings.Set("update.tag", "");
+        Check(UpdateChecker.DueForAutoCheck() && UpdateChecker.Remembered() == null, "never checked: due, nothing remembered");
+        UpdateChecker.Record(UpdateChecker.Parse("{\"tag_name\":\"v99.0.0\"}", UpdateChecker.Current));
+        Check(!UpdateChecker.DueForAutoCheck(), "just checked: not due");
+        Check(UpdateChecker.Remembered() != null && UpdateChecker.Remembered().IsNewer, "the newer release is remembered");
+        Settings.Set("update.at", DateTime.UtcNow.AddHours(-7).Ticks.ToString());
+        Check(UpdateChecker.DueForAutoCheck(), "after a few hours: due again");
+        Settings.Set("update.at", DateTime.UtcNow.AddHours(5).Ticks.ToString());
+        Check(UpdateChecker.DueForAutoCheck(), "a clock that went back does not block the check");
+
+        // the window: the version is in the title and on the label; a newer release is announced there
+        InstallContext();
+        Func<string> savedFetch = UpdateChecker.Fetch;
+        bool savedEnabled = UpdateChecker.Enabled;
+        try
+        {
+            UpdateChecker.Enabled = true;
+            Settings.Set("update.at", "");
+            Settings.Set("update.tag", "");
+            UpdateChecker.Fetch = delegate { return "{\"tag_name\":\"v99.0.0\"}"; };
+            MainForm f = new MainForm();
+            Offscreen(f);
+            f.Show();
+            Check(f.Text.EndsWith(AppInfo.Version), "the title shows the version: " + f.Text);
+            Check(WaitFor(delegate { return f.VersionText.Contains("доступна 99.0.0"); }, 5000), "a newer release is announced: " + f.VersionText);
+            Check(f.VersionText.StartsWith("Версия " + AppInfo.Version), "the notice keeps the running version: " + f.VersionText);
+            f.Close();
+
+            // the next start shows the notice at once, without asking GitHub again
+            bool asked = false;
+            UpdateChecker.Fetch = delegate { asked = true; return ""; };
+            f = new MainForm();
+            Offscreen(f);
+            f.Show();
+            Check(WaitFor(delegate { return f.VersionText.Contains("доступна 99.0.0"); }, 3000), "the notice comes back from the settings: " + f.VersionText);
+            Pump(300);
+            Check(!asked, "...without asking GitHub again");
+            f.Close();
+
+            // up to date, and no internet: just the version
+            Settings.Set("update.at", "");
+            Settings.Set("update.tag", "");
+            UpdateChecker.Fetch = delegate { return "{\"tag_name\":\"v" + AppInfo.Version + "\"}"; };
+            f = new MainForm();
+            Offscreen(f);
+            f.Show();
+            Check(WaitFor(delegate { return Settings.Get("update.tag", "") != ""; }, 5000), "the answer was recorded");
+            Check(f.VersionText == "Версия " + AppInfo.Version, "up to date: only the version is shown: " + f.VersionText);
+            f.Close();
+
+            Settings.Set("update.at", "");
+            Settings.Set("update.tag", "");
+            UpdateChecker.Fetch = delegate { asked = true; throw new System.Net.WebException("no internet"); };
+            asked = false;
+            f = new MainForm();
+            Offscreen(f);
+            f.Show();
+            Check(WaitFor(delegate { return asked; }, 5000), "the lookup was tried");
+            Pump(200);
+            Check(f.VersionText == "Версия " + AppInfo.Version, "no internet: only the version is shown, no error: " + f.VersionText);
+            f.Close();
+        }
+        finally
+        {
+            UpdateChecker.Fetch = savedFetch;
+            UpdateChecker.Enabled = savedEnabled;
+            Settings.Set("update.at", "");
+            Settings.Set("update.tag", "");
+        }
     }
 
     static void TestDiscovery()
@@ -877,6 +1041,7 @@ static class NetTests
     {
         Sounds.Muted = true;          // no beeps while testing
         Settings.Persist = false;     // and never touch the real settings file
+        UpdateChecker.Enabled = false; // and never ask GitHub (the update tests switch it on with a fake answer)
         // an exception must stop the run with its text, never raise a "program has stopped working" dialog nobody answers
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);
         AppDomain.CurrentDomain.UnhandledException += delegate(object s, UnhandledExceptionEventArgs e)
@@ -893,6 +1058,7 @@ static class NetTests
 
         if (run("discovery")) TestDiscovery();
         if (run("steam")) { TestSteamNative(); TestSteamTransport(); }
+        if (run("update")) { TestSteamDllWatch(); TestUpdateChecker(); }
         if (run("games")) { useSteam = false; TestGames(); useSteam = true; TestGames(); }
         if (run("review")) TestReview();
         if (run("premove")) TestPremove();

@@ -95,7 +95,7 @@ namespace ChessGame
 
         public MainForm()
         {
-            Text = "Шахматы";
+            Text = "Шахматы " + AppInfo.Version;
             AutoScaleMode = AutoScaleMode.None;
             Font = Ui.Font(9.5f);
             DoubleBuffered = true;
@@ -159,6 +159,7 @@ namespace ChessGame
                 SaveSettings();
             };
             FormClosed += delegate { Theme.Changed -= ApplyTheme; };
+            Shown += delegate { AutoCheckForUpdate(); };
 
             loadingSettings = false;
             ApplyTheme();
@@ -204,13 +205,14 @@ namespace ChessGame
             sideTable.Dock = DockStyle.Fill;
             sideTable.ColumnCount = 1;
             sideTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
-            sideTable.RowCount = 6;
+            sideTable.RowCount = 7;
             sideTable.RowStyles.Add(new RowStyle(SizeType.Absolute, Ui.S(46)));    // header
             sideTable.RowStyles.Add(new RowStyle(SizeType.Absolute, Ui.S(52)));    // mode switch
             sideTable.RowStyles.Add(new RowStyle(SizeType.Absolute, Ui.S(86)));    // status
             sideTable.RowStyles.Add(new RowStyle(SizeType.AutoSize));              // settings
             sideTable.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));         // moves
             sideTable.RowStyles.Add(new RowStyle(SizeType.Absolute, Ui.S(54)));    // actions
+            sideTable.RowStyles.Add(new RowStyle(SizeType.Absolute, Ui.S(24)));    // version / update notice
 
             // header: title + three icon buttons
             headerTable = new BufferedTable();
@@ -335,6 +337,7 @@ namespace ChessGame
             actionsTable.Controls.Add(btnHint, 2, 0);
             actionsTable.Controls.Add(btnFlip, 3, 0);
             sideTable.Controls.Add(actionsTable, 0, 5);
+            sideTable.Controls.Add(BuildVersionLabel(), 0, 6);
 
             side.Controls.Add(sideTable);
             Controls.Add(boardArea);
@@ -386,6 +389,7 @@ namespace ChessGame
             foreach (Label l in new Label[] { capSide, capLevel, capTransport, capHostSeat, movesTitle }) l.ForeColor = t.Muted;
             lblTwoHint.ForeColor = t.Muted;
             lblNet.ForeColor = t.Muted;
+            ShowVersion();
             if (IsHandleCreated) NativeUi.StyleTitleBar(Handle, t.IsDark, t.Window, t.Text);
             UpdateHeaderButtons();
             Invalidate(true);

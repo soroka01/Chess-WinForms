@@ -150,6 +150,12 @@ namespace ChessGame
 
         // ---- locating and loading the DLL
 
+        /// <summary>
+        /// What differs from the DLL of the previous run (Steam updated, replaced or removed it), or null. Set by Load();
+        /// the DLL has been checked in full again by then, so this is for information only.
+        /// </summary>
+        public static string ChangeNote { get; private set; }
+
         /// <summary>Loads steam_api64.dll from next to the game or from the Steam installation.</summary>
         public static void Load()
         {
@@ -157,26 +163,52 @@ namespace ChessGame
             if (IntPtr.Size != 8)
                 throw new SteamUnavailableException("Режим Steam работает только в 64-битном процессе.");
 
-            // 1) next to the program, 2) a path from the environment, 3) Steam games, newest DLL first
+            // The DLL of the previous run: a Steam update of a game (or of Steam itself) may have changed or removed it since.
+            SteamDllStamp last = SteamDllMemory.Recall();
+            SteamDllStamp lastNow = last == null ? null : SteamDllStamp.Of(last.Path);
+
+            // 1) next to the program, 2) a path from the environment, 3) the DLL of the previous run if it is byte for byte the same
+            // (nothing to look for), 4) Steam games, newest DLL first. A DLL that changed goes through every check again like any other.
             List<string> tried = new List<string>();
             List<string> rejected = new List<string>();
             List<string> first = new List<string>();
             first.Add(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, DllName));
             string fromEnv = Environment.GetEnvironmentVariable("CHESS_STEAM_API");
             if (!string.IsNullOrEmpty(fromEnv)) first.Add(fromEnv);
+            if (last != null && last.SameContent(lastNow)) first.Add(last.Path);
             first.AddRange(NewestFirst(FindInSteamLibraries(false)));
-            if (TryLoadAny(first, tried, rejected)) return;
+            if (TryLoadAny(first, tried, rejected)) { OnLoaded(last); return; }
 
             // nothing suitable in the usual places: look deeper inside the games (Unity games hide it in *_Data\Plugins)
-            if (TryLoadAny(NewestFirst(FindInSteamLibraries(true)), tried, rejected)) return;
+            if (TryLoadAny(NewestFirst(FindInSteamLibraries(true)), tried, rejected)) { OnLoaded(last); return; }
 
+            string lost = SteamDllMemory.DescribeLostFile(last, lastNow);
+            string prefix = lost == null ? "" : lost + ": похоже, Steam обновил файлы.\n";
             if (rejected.Count == 0)
                 throw new SteamUnavailableException(
-                    "Не найден steam_api64.dll. Положите steam_api64.dll (его можно взять из папки любой современной игры Steam) " +
+                    prefix + "Не найден steam_api64.dll. Положите steam_api64.dll (его можно взять из папки любой современной игры Steam) " +
                     "рядом с Chess.exe.");
             throw new SteamUnavailableException(
-                "Нашлись только устаревшие steam_api64.dll, в них нет нужных функций Steam (" + rejected[0] + ").\n" +
+                prefix + "Нашлись только неподходящие steam_api64.dll (" + rejected[0] + ").\n" +
                 "Положите свежий steam_api64.dll рядом с Chess.exe: его можно взять из папки недавно вышедшей игры Steam.");
+        }
+
+        /// <summary>A usable DLL was found: say what changed against the last run and remember this one.</summary>
+        static void OnLoaded(SteamDllStamp last)
+        {
+            SteamDllStamp now = SteamDllStamp.Of(LoadedFrom);
+            ChangeNote = SteamDllMemory.DescribeChange(last, now);
+            if (now != null) SteamDllMemory.Remember(now);
+        }
+
+        /// <summary>
+        /// The loaded DLL had every export but failed in use: remember its content, so that the next start takes another file
+        /// (this one is tried again as soon as Steam replaces it with a different build).
+        /// </summary>
+        public static void MarkLoadedBad()
+        {
+            SteamDllStamp stamp = LoadedFrom == null ? null : SteamDllStamp.Of(LoadedFrom);
+            if (stamp != null) SteamDllMemory.MarkBad(stamp);
         }
 
         internal static bool TryLoadAnyForTest(IEnumerable<string> paths, List<string> tried, List<string> rejected)
@@ -184,7 +216,7 @@ namespace ChessGame
             return TryLoadAny(paths, tried, rejected);
         }
 
-        /// <summary>Loads the first DLL that is signed by Valve and has every function we call.</summary>
+        /// <summary>Loads the first DLL that is signed by Valve, has every function we call and did not fail before.</summary>
         static bool TryLoadAny(IEnumerable<string> paths, List<string> tried, List<string> rejected)
         {
             foreach (string path in paths)
@@ -195,6 +227,11 @@ namespace ChessGame
                 try
                 {
                     if (!File.Exists(path) || !IsSignedByValve(path)) continue;
+                    if (SteamDllMemory.AnyBad && SteamDllMemory.IsBad(SteamDllStamp.Of(path)))
+                    {
+                        rejected.Add(path + ": этот файл уже не заработал (будет проверен снова, когда Steam его обновит)");
+                        continue;
+                    }
                     IntPtr h = LoadLibraryW(path);
                     if (h == IntPtr.Zero) continue;
                     List<string> missing = MissingExports(h);
@@ -453,7 +490,11 @@ namespace ChessGame
             byte[] err = new byte[1024];
             int result;
             try { result = SteamNative.InitApi(err); }
-            catch (Exception ex) { throw new SteamUnavailableException("Не удалось запустить Steam API: " + ex.Message); }
+            catch (Exception ex)
+            {
+                if (ex is EntryPointNotFoundException || ex is BadImageFormatException) SteamNative.MarkLoadedBad();
+                throw new SteamUnavailableException("Не удалось запустить Steam API: " + ex.Message);
+            }
             if (result != 0)
             {
                 string detail = Encoding.UTF8.GetString(err).TrimEnd('\0');
@@ -481,7 +522,9 @@ namespace ChessGame
             catch (EntryPointNotFoundException)
             {
                 SteamNative.SteamAPI_Shutdown();
-                throw new SteamUnavailableException("Версия steam_api64.dll не подходит (" + SteamNative.LoadedFrom + ").");
+                SteamNative.MarkLoadedBad();
+                throw new SteamUnavailableException("Версия steam_api64.dll не подходит (" + SteamNative.LoadedFrom + ").\n" +
+                                                    "Перезапустите игру: при следующем запуске будет выбран другой файл.");
             }
             catch (SteamUnavailableException)
             {

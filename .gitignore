@@ -1,0 +1,21 @@
+# Build output
+Chess.exe
+Chess.build.exe
+Chess.new.exe
+Chess-game.zip
+*.pdb
+tests/bin/
+
+# Valve's redistributable is not ours to publish; the game finds one in any installed Steam game
+steam_api64.dll
+steam_appid.txt
+
+# Local data
+settings.ini
+*.log
+
+# Editors and OS
+.vs/
+.vscode/
+*.user
+Thumbs.db

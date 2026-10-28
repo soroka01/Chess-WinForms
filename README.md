@@ -1,78 +1,78 @@
 # ♟️ Chess WinForms
 
-> Шахматы для Windows: игра с компьютером, вдвоём за одним ПК и по сети (локальная сеть или Steam) — с комнатами, зрителями, текстовым и голосовым чатом.
+> Windows chess: play the computer, a friend on the same PC, or over the network (LAN or Steam) — with rooms, spectators, text and voice chat.
 
-🌐 **Язык / Language:** [Русский](README.md) · [English](README_EN.md)
+🌐 **Language / Язык:** [English](README.md) · [Русский](README_RU.md)
 
 ![C#](https://img.shields.io/badge/C%23-5-239120?logo=csharp&logoColor=white)
 ![.NET Framework](https://img.shields.io/badge/.NET%20Framework-4.8-512BD4?logo=dotnet&logoColor=white)
 ![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4?logo=windows&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
-## 📌 Обзор
+## 📌 Overview
 
-Окно с доской, игрой против встроенного движка, режимом «вдвоём» и сетевыми комнатами. Один человек создаёт комнату, за столом садятся двое, остальные (до 10 человек в комнате) наблюдают, пишут в чат и говорят в микрофон. Хост решает, кого пускать и кому что разрешено.
+A board window with a built-in engine, a hot-seat mode and network rooms. One person opens a room, two sit at the board, everybody else (up to 10 people in a room) watches, types in the chat and talks on the microphone. The host decides who may join and who may do what.
 
-Ничего устанавливать не нужно: достаточно Windows 10/11, а собирается проект компилятором `csc.exe`, который уже есть в системе (Visual Studio и .NET SDK не нужны).
+Nothing has to be installed: Windows 10/11 is enough, and the project is built with the `csc.exe` compiler that ships with the system (no Visual Studio or .NET SDK needed).
 
 > [!NOTE]
-> Режим Steam использует общий тестовый AppID Spacewar (480): на время игры в вашем профиле виден статус «Играет в Spacewar». Библиотека `steam_api64.dll` принадлежит Valve и в репозиторий не входит — игра сама находит её в установленных играх Steam.
+> The Steam mode uses the shared test AppID Spacewar (480): while a room is open your Steam profile shows "Playing Spacewar". `steam_api64.dll` belongs to Valve and is not part of this repository — the game finds it in your installed Steam games on its own.
 
-## 📸 Скриншоты
+## 📸 Screenshots
 
-| Хост и входящие запросы | Вкладка «Люди» |
+| Host and incoming requests | "People" tab |
 | --- | --- |
-| ![Запросы на вход](docs/screenshots/room-requests-dark.png) | ![Люди в комнате](docs/screenshots/people-dark.png) |
+| ![Join requests](docs/screenshots/room-requests-dark.png) | ![People in the room](docs/screenshots/people-dark.png) |
 
-| Зритель в чате | Свободное место за столом (светлая тема) |
+| Spectator in the chat | A free seat at the table (light theme) |
 | --- | --- |
-| ![Чат зрителя](docs/screenshots/spectator-chat-dark.png) | ![Партия приостановлена](docs/screenshots/paused-light.png) |
+| ![Spectator chat](docs/screenshots/spectator-chat-dark.png) | ![Paused game](docs/screenshots/paused-light.png) |
 
-## ✨ Возможности
+## ✨ Features
 
-- Три режима: против компьютера (5 уровней от «Новичка» до «Мастера»), вдвоём за одним компьютером, по сети.
-- Полные правила: рокировка, взятие на проходе, превращение пешки, мат, пат, недостаточный материал, правило 50 ходов, троекратное повторение, сдача и ничья по соглашению.
-- Сетевая комната до 10 человек: двое играют, остальные смотрят; можно встать из-за стола в зрители и сесть обратно.
-- Хост подтверждает вход каждого участника и ведёт партию: ходы, сдача, ничья и реванш проходят через него и проверяются.
-- Права зрителей: чат и голос можно отключить всем зрителям сразу или одному человеку; любой может заглушить кого-то только у себя.
-- Передача роли хоста другому участнику (в Steam мгновенно, в локальной сети — с переездом комнаты и проверкой доступности).
-- Если игрок вышел, партия приостанавливается; её продолжит тот, кто сядет на свободное место.
-- Текстовый и голосовой чат: 16 кГц, IMA ADPCM, детектор речи, автоматическая громкость, смешивание нескольких говорящих, индикаторы говорящих.
-- Ход в ожидании (premove), подсказка, просмотр прошлых позиций, анимация хода, звуки.
-- Тёмная и светлая темы, 4 стиля доски, масштабирование под DPI.
-- Версия игры в заголовке окна и под панелью кнопок; если на GitHub вышла новая версия, там же появится надпись «доступна … — обновить» (нажмите — игра предложит открыть страницу загрузки; сама она ничего не скачивает).
-- Нет зависимостей: только .NET Framework 4.8, который есть в Windows 10/11.
+- Three modes: against the computer (5 levels from "Beginner" to "Master"), two players on one PC, and network.
+- Full rules: castling, en passant, promotion, checkmate, stalemate, insufficient material, the fifty-move rule, threefold repetition, resignation and agreed draws.
+- Network rooms of up to 10 people: two play, the others watch; anybody can stand up to become a spectator and sit down again.
+- The host approves every newcomer and runs the game: moves, resignation, draws and rematches go through it and are validated.
+- Spectator permissions: chat and voice can be switched off for all spectators or for one person; anybody can silence someone just for themselves.
+- Hand-over of the host role to another member (instant on Steam; on a LAN the room moves to the new host's PC after a reachability check).
+- If a player leaves, the game pauses; whoever sits at the free seat continues it.
+- Text and voice chat: 16 kHz IMA ADPCM, voice activity detection, automatic gain, mixing of several speakers, speaking indicators.
+- Queued move (premove), hint, review of earlier positions, move animation, sounds.
+- Dark and light themes, 4 board styles, DPI scaling.
+- The game version is shown in the window title and under the buttons; when a newer version is released on GitHub, a "… available — update" line appears there (click it and the game offers to open the download page; it never downloads anything itself).
+- No dependencies: only .NET Framework 4.8, which Windows 10/11 already has.
 
-## 🏗️ Как это работает
+## 🏗️ How it works
 
 ```mermaid
 flowchart LR
-    UI["MainForm: доска, панели, чат"] --> R["RoomSession: участники, места, права"]
+    UI["MainForm: board, panels, chat"] --> R["RoomSession: members, seats, permissions"]
     R --> T{"IRoomTransport"}
-    T --> L["LanRoomTransport: TCP-хаб"]
-    T --> S["SteamRoomTransport: чат лобби Steam"]
-    UI --> E["Game и Engine: правила и поиск хода"]
-    UI --> V["VoiceChannel: захват, кодек, микшер"]
+    T --> L["LanRoomTransport: TCP hub"]
+    T --> S["SteamRoomTransport: Steam lobby chat"]
+    UI --> E["Game and Engine: rules and move search"]
+    UI --> V["VoiceChannel: capture, codec, mixer"]
 ```
 
-Хост — единственный, кто пишет состояние комнаты и партии. Игроки отправляют ему запросы, он проверяет их и рассылает результат, поэтому все копии игры видят события в одном порядке и подделать ход чужой копией нельзя.
+The host is the only writer of the room and of the game. Players send it requests, it validates them and announces the result, so every copy of the game sees the events in the same order and a moved piece cannot be forged from another copy.
 
-| Строка | Направление | Назначение |
+| Line | Direction | Purpose |
 | --- | --- | --- |
-| `MOVE <ply> <uci>`, `RESIGN`, `DRAW*`, `NEW*` | игрок → хост | запросы игроков (принимаются только от тех, кто сидит за столом) |
-| `PLAYED`, `RESULT`, `OFFER`, `NEWGAME`, `SYNC` | хост → все | подтверждённые события партии, полное состояние для вошедших позже |
-| `ROOM <rev> <host> <flags> <members>` | хост → все | участники, места, права; применяется только по возрастанию версии |
-| `CHAT`, `VOICE` | любой → все | проверяются по правам комнаты у отправителя и у каждого получателя |
+| `MOVE <ply> <uci>`, `RESIGN`, `DRAW*`, `NEW*` | player → host | player requests (accepted only from those sitting at the table) |
+| `PLAYED`, `RESULT`, `OFFER`, `NEWGAME`, `SYNC` | host → everyone | confirmed game events, the whole game for late joiners |
+| `ROOM <rev> <host> <flags> <members>` | host → everyone | members, seats, permissions; applied only with a growing revision |
+| `CHAT`, `VOICE` | anyone → everyone | checked against the room's permissions by the sender and by every receiver |
 
-## 🚀 Быстрый старт
+## 🚀 Quick start
 
-### Готовая сборка
+### Ready-made build
 
-1. Откройте раздел [Releases](https://github.com/soroka01/Chess-WinForms/releases) и скачайте архив последней версии.
-2. Распакуйте в любую папку (не запускайте из архива) и откройте `Chess.exe`.
-3. Если Windows пишет «Windows защитила ваш компьютер» — нажмите «Подробнее» → «Выполнить в любом случае» (программа не подписана).
+1. Open [Releases](https://github.com/soroka01/Chess-WinForms/releases) and download the archive of the latest version.
+2. Unpack it to any folder (do not run it from inside the archive) and open `Chess.exe`.
+3. If Windows says "Windows protected your PC", click "More info" → "Run anyway" (the program is not signed).
 
-### Сборка из исходников
+### Building from source
 
 ```bat
 git clone https://github.com/soroka01/Chess-WinForms.git
@@ -80,102 +80,102 @@ cd Chess-WinForms
 build.bat
 ```
 
-`build.bat` собирает `Chess.exe` компилятором `csc.exe` из .NET Framework 4.x (есть в Windows). Код написан на C# 5.
+`build.bat` builds `Chess.exe` with `csc.exe` from .NET Framework 4.x (part of Windows). The code is C# 5.
 
-### Игра по сети
+### Network play
 
-Все участники запускают одну и ту же версию игры и выбирают режим «По сети».
+Everybody runs the same version of the game and picks the "Network" mode.
 
-**Локальная сеть (Wi-Fi или кабель)**
+**Local network (Wi-Fi or cable)**
 
-1. Хост выбирает своё место за столом (белые, чёрные или зритель), соединение «Локальная сеть» и нажимает «Создать игру». Внизу появится его IP-адрес.
-2. Остальные нажимают «Подключиться…», выбирают игру в списке (она находится автоматически) или вводят IP вручную, выбирают «Играть» или «Смотреть».
-3. Если Windows спросит про брандмауэр — «Разрешить доступ».
+1. The host picks a seat (white, black or spectator), the "Local network" connection and presses "Create game". Their IP address appears at the bottom.
+2. The others press "Connect…", pick the game from the list (it is discovered automatically) or type the IP, and choose to play or to watch.
+3. If Windows asks about the firewall, choose "Allow access".
 
 **Steam**
 
-1. Все запускают Steam и входят в аккаунт; в поле «Соединение» выбирают «Steam».
-2. Хост нажимает «Создать игру», остальные — «Подключиться…» и находят комнату в списке (друзья отмечены ★, у каждой комнаты видно, сколько человек играет и смотрит).
-3. Если `steam_api64.dll` не найдена автоматически, положите её рядом с `Chess.exe` (она есть в папке любой игры Steam).
+1. Everybody starts Steam and signs in; the "Connection" field is set to "Steam".
+2. The host presses "Create game", the others press "Connect…" and find the room in the list (friends are marked ★, each room shows how many people play and watch).
+3. If `steam_api64.dll` is not found automatically, put it next to `Chess.exe` (it is in the folder of any Steam game).
 
-## 🕹️ Управление
+## 🕹️ Controls
 
-| Клавиши | Действие |
+| Keys | Action |
 | --- | --- |
-| Мышь | перетаскивание или два клика; пока ходит соперник, можно выбрать ход в ожидании |
-| `Ctrl+N` / `Ctrl+Z` | новая партия / отменить ход (не в сетевой игре) |
-| `F` | повернуть доску |
-| `H` | подсказка (не в сетевой игре) |
-| `← →`, `Home`, `End` | просмотр прошлых позиций; `End` или `Esc` — вернуться к игре |
-| `Esc` / правая кнопка | отмена хода в ожидании |
-| `T` / `M` | тёмная/светлая тема / звук |
-| `V` | микрофон вкл/выкл (в сетевой игре) |
+| Mouse | drag or click twice; while the opponent thinks you can queue a move |
+| `Ctrl+N` / `Ctrl+Z` | new game / take a move back (not in network games) |
+| `F` | flip the board |
+| `H` | hint (not in network games) |
+| `← →`, `Home`, `End` | review earlier positions; `End` or `Esc` returns to the game |
+| `Esc` / right click | cancel a queued move |
+| `T` / `M` | dark/light theme / sound |
+| `V` | microphone on/off (network games) |
 
-## 🧪 Тесты
+## 🧪 Tests
 
-Тесты — консольные программы, собираемые из тех же исходников (папка `tests/`).
+The tests are console programs built from the same sources (the `tests/` folder).
 
-| Скрипт | Что проверяет |
+| Script | What it checks |
 | --- | --- |
-| `tests\run-tests.bat` | движок: перфт-проверка генератора ходов, партии движка с движком |
-| `tests\run-room-tests.bat` | комната (`RoomSession`) на in-memory-транспорте: вход, места, права, передача хоста |
-| `tests\run-lan-room-tests.bat` | TCP-транспорт LAN: хаб, переподключения, лимиты, передача хаба |
-| `tests\run-voice-tests.bat` | кодек, детектор речи, джиттер-буфер, микшер |
-| `tests\run-net-tests.bat [группа]` | целые окна игры: партии, зрители, права, передача хоста, чат и голос (LAN и имитация Steam) |
+| `tests\run-tests.bat` | the engine: perft check of the move generator, engine-versus-engine games |
+| `tests\run-room-tests.bat` | the room (`RoomSession`) on an in-memory transport: joining, seats, permissions, host hand-over |
+| `tests\run-lan-room-tests.bat` | the LAN TCP transport: hub, reconnects, limits, hub hand-over |
+| `tests\run-voice-tests.bat` | codec, voice detection, jitter buffer, mixer |
+| `tests\run-net-tests.bat [group]` | whole game windows: games, spectators, permissions, host hand-over, chat and voice (LAN and a fake Steam) |
 
-Тестовые окна открываются за пределами экрана; зависший тест сам останавливается и печатает, где застрял.
+Test windows open off-screen; a test that hangs stops by itself and prints where it is stuck.
 
-## 🗂️ Структура проекта
+## 🗂️ Project structure
 
 ```text
 Chess-WinForms/
 ├── src/
-│   ├── Position.cs, Game.cs, Engine.cs   # правила, партия, поиск хода
-│   ├── RoomSession.cs                    # комната: участники, места, права, хост
-│   ├── RoomTransport.cs                  # интерфейсы транспортов
-│   ├── LanRoomTransport.cs               # TCP-хаб, обнаружение, переезд хаба
-│   ├── SteamRoomTransport.cs             # комната поверх лобби Steam
-│   ├── SteamLobbyService.cs, SteamLink.cs # Steam API без SDK: загрузка DLL и лобби
-│   ├── SteamDllStamp.cs                  # отпечаток DLL Steam: заметить, что Steam её изменил
-│   ├── AppInfo.cs, UpdateChecker.cs      # версия игры и проверка новой версии на GitHub
-│   ├── Voice.cs                          # микрофон, кодек, микшер, динамик
-│   ├── MainForm*.cs                      # окно, сетевая игра, чат, вкладка «Люди»
+│   ├── Position.cs, Game.cs, Engine.cs   # rules, game, move search
+│   ├── RoomSession.cs                    # the room: members, seats, permissions, host
+│   ├── RoomTransport.cs                  # transport interfaces
+│   ├── LanRoomTransport.cs               # TCP hub, discovery, hub relocation
+│   ├── SteamRoomTransport.cs             # a room on top of a Steam lobby
+│   ├── SteamLobbyService.cs, SteamLink.cs # Steam API without the SDK: DLL loading and lobbies
+│   ├── SteamDllStamp.cs                  # fingerprint of the Steam DLL: notice that Steam changed it
+│   ├── AppInfo.cs, UpdateChecker.cs      # the game version and the check for a newer one on GitHub
+│   ├── Voice.cs                          # microphone, codec, mixer, speaker
+│   ├── MainForm*.cs                      # window, network game, chat, "People" tab
 │   ├── BoardControl.cs, PlayerBar.cs, ChatControl.cs, PeopleList.cs, ...
-│   └── Theme.cs, Themed*.cs              # собственная отрисовка и темы
-├── tests/                                # тесты и заглушки (лобби, аудио, транспорт)
-├── docs/screenshots/                     # картинки для README
-├── build.bat                             # сборка Chess.exe
+│   └── Theme.cs, Themed*.cs              # custom drawing and themes
+├── tests/                                # tests and stand-ins (lobby, audio, transport)
+├── docs/screenshots/                     # README images
+├── build.bat                             # builds Chess.exe
 ├── chess.ico
 └── LICENSE
 ```
 
-## 🔒 Безопасность и приватность
+## 🔒 Security & privacy
 
-- Хост решает, кто играет, пишет и говорит, но общение комнаты не секретно. Пока человек ждёт решения хоста, его копия игры уже получает общие сообщения комнаты (ходы, чат, голос).
-- В режиме Steam всё идёт через общий чат лобби: любой, кто в него вошёл, получает те же сообщения, пока его копия игры не вышла; исключение из комнаты выполняет сама программа участника.
-- При передаче хоста в локальной сети новый хост получает служебные ключи участников (по ним комната узнаёт вернувшихся). Передавайте роль тем, кому доверяете.
-- Микрофон слышат все в комнате. Зовите тех, кому доверяете.
-- Для режима Steam игра загружает только `steam_api64.dll` с подписью Valve и проверяет, что в ней есть нужные функции.
-- Игра запоминает, какой `steam_api64.dll` использовала (путь, размер, версия, хеш). Если Steam обновил или убрал этот файл, он проверяется заново, как любой другой; файл, который загрузился, но не заработал, пропускается до тех пор, пока Steam не заменит его другой сборкой.
-- Раз в несколько часов игра делает один запрос к `api.github.com` (последний релиз), чтобы узнать о новой версии. Отключить: строка `updates=0` в `%APPDATA%\ChessGame\settings.ini`.
+- The host decides who plays, writes and speaks, but room traffic is not secret. While a person waits for the host's decision, their copy of the game already receives the room's shared messages (moves, chat, voice).
+- In the Steam mode everything travels through the shared lobby chat: anybody who has entered it receives the same messages until their copy of the game leaves; removing someone from the room is carried out by that member's own program.
+- When the host role is handed over on a LAN, the new host receives the members' service keys (the room recognises returning people by them). Hand the role over to people you trust.
+- Everybody in the room hears the microphone. Invite people you trust.
+- For the Steam mode the game loads only a `steam_api64.dll` signed by Valve and checks that it exports the functions it needs.
+- The game remembers which `steam_api64.dll` it used (path, size, version, hash). If Steam updated or removed that file, it is checked again like any other; a file that loaded but did not work is skipped until Steam replaces it with a different build.
+- Every few hours the game makes one request to `api.github.com` (the latest release) to learn about a new version. To switch it off, put `updates=0` into `%APPDATA%\ChessGame\settings.ini`.
 
-## ⚠️ Ограничения
+## ⚠️ Limitations
 
-- Только Windows (WinForms, winmm); код на C# 5 и .NET Framework 4.8.
-- Нет шахматных часов и экспорта партии (PGN).
-- Подсказка и отмена хода в сетевой игре отключены.
-- Если хост закрыл игру или потерял связь, комната закрывается без выбора нового хоста — передайте роль заранее.
-- Голос по Steam идёт через чат лобби; если говорят сразу несколько человек, звук может прерываться (в локальной сети такого нет).
-- Передача хоста по локальной сети через два разных компьютера с брандмауэром и комната из нескольких настоящих аккаунтов Steam проверены только в автотестах на loopback и имитации лобби.
-- Качество голоса умеренное: кодек IMA ADPCM; для остального лучше наушники.
+- Windows only (WinForms, winmm); the code is C# 5 on .NET Framework 4.8.
+- No chess clocks and no game export (PGN).
+- Hint and take-back are disabled in network games.
+- If the host closes the game or loses the connection, the room closes without choosing a new host — hand the role over beforehand.
+- Voice on Steam goes through lobby chat; with several people talking at once the sound may break up (not on a LAN).
+- A LAN hand-over between two different computers behind a firewall and a room of several real Steam accounts have only been tested with automated tests on loopback and on a fake lobby.
+- Voice quality is moderate: the IMA ADPCM codec; headphones are better, otherwise the microphone picks up the speakers.
 
-## 📄 Лицензия
+## 📄 License
 
 [MIT](LICENSE).
 
-## 💬 Поддержка
+## 💬 Support
 
-Можно [форкнуть репозиторий](https://github.com/soroka01/Chess-WinForms/fork) и доработать под себя. Если проект пригодился, поставьте [Star](https://github.com/soroka01/Chess-WinForms) — так я увижу, что он был кому-то полезен.
+You can [fork the repository](https://github.com/soroka01/Chess-WinForms/fork) and adapt it to your needs. If the project was useful, please give it a [Star](https://github.com/soroka01/Chess-WinForms) — it shows me that someone found it useful.
 
 ---
 

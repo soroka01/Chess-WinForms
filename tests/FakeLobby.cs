@@ -40,6 +40,9 @@ sealed class FakeLobbyService : ILobbyService
     /// <summary>When true the service silently drops chat (a peer that never answers).</summary>
     public bool Mute;
 
+    /// <summary>When true SendChat reports failure although we are still in the lobby (Steam's rate limit or size refusal).</summary>
+    public bool RejectChat;
+
     public FakeLobbyService(FakeHub hub, string name)
     {
         this.hub = hub;
@@ -159,6 +162,7 @@ sealed class FakeLobbyService : ILobbyService
     {
         FakeHub.Lobby l;
         if (Mute) return true;
+        if (RejectChat) return false;
         if (!hub.Lobbies.TryGetValue(lobby, out l) || !l.Members.Contains(this)) return false;
         foreach (FakeLobbyService m in l.Members.ToArray())   // everybody, the sender included
         {
@@ -166,5 +170,100 @@ sealed class FakeLobbyService : ILobbyService
             target.Later(delegate { if (target.ChatReceived != null) target.ChatReceived(lobby, MySteamId, text); });
         }
         return true;
+    }
+}
+
+/// <summary>
+/// Checks of SteamRoomTransport that need nothing but the fake lobbies: events leave through the UI queue, one rejected line does
+/// not close the room, the byte limit of a chat message, a vanished lobby. Run() is called by the "steam" group of NetTests.
+/// </summary>
+static class SteamTransportChecks
+{
+    sealed class Side
+    {
+        public readonly FakeLobbyService Svc;
+        public readonly SteamRoomTransport T;
+        public readonly List<string> Lines = new List<string>();
+        public readonly List<string> Closed = new List<string>();
+        public readonly List<string> Gone = new List<string>();
+        public int Connected;
+        public bool InsideCall;       // an event was raised while a call of ours was running
+        public bool Calling;
+
+        public Side(FakeHub hub, string name, bool host, ulong lobby)
+        {
+            Svc = new FakeLobbyService(hub, name);
+            T = host ? SteamRoomTransport.Host(Svc, name) : SteamRoomTransport.Join(Svc, lobby, name);
+            T.Connected += delegate { Note(); Connected++; };
+            T.LineReceived += delegate(string from, string line) { Note(); Lines.Add(line); };
+            T.PeerDisconnected += delegate(string id) { Note(); Gone.Add(id); };
+            T.Closed += delegate(string reason) { Note(); Closed.Add(reason); };
+            T.Start();
+        }
+
+        void Note() { if (Calling) InsideCall = true; }
+    }
+
+    public static void Run()
+    {
+        Console.WriteLine("Steam room transport: rejected lines, limits, event delivery");
+        TestKit.InstallContext();
+        FakeHub hub = new FakeHub();
+        Side host = new Side(hub, "Host", true, 0);
+        TestKit.Check(TestKit.WaitFor(delegate { return host.Connected == 1; }, 2000), "host is up");
+        ulong lobby = 0;
+        foreach (ulong id in hub.Lobbies.Keys) lobby = id;
+        Side guest = new Side(hub, "Guest", false, lobby);
+        TestKit.Check(TestKit.WaitFor(delegate { return guest.Connected == 1; }, 2000), "guest is in");
+
+        // a message Steam refuses (rate limit) costs that line only
+        guest.Svc.RejectChat = true;
+        guest.T.Broadcast("lost line");
+        TestKit.Pump(200);
+        TestKit.Check(guest.Closed.Count == 0 && host.Lines.Count == 0, "one refused line does not close the room");
+        guest.Svc.RejectChat = false;
+        guest.T.Broadcast("next line");
+        TestKit.Check(TestKit.WaitFor(delegate { return host.Lines.Count == 1; }, 2000) && host.Lines[0] == "next line", "and the room keeps working");
+
+        // the limit is in bytes: 1300 three-byte characters fit, 1500 do not (although both are under 2048 characters)
+        string fits = new string('\u20AC', 1300), tooBig = new string('\u20AC', 1500);
+        guest.T.Broadcast(tooBig);
+        guest.T.Broadcast(fits);
+        TestKit.Check(TestKit.WaitFor(delegate { return host.Lines.Count == 2; }, 2000), "a line within the byte limit arrives");
+        TestKit.Pump(200);
+        TestKit.Check(host.Lines.Count == 2 && host.Lines[1] == fits && guest.Closed.Count == 0, "a line over the byte limit is dropped, the room stays: " + host.Lines.Count);
+
+        // events are never raised inside the call that causes them
+        host.Calling = true;
+        host.T.Disconnect(guest.T.MyId);
+        host.Calling = false;
+        TestKit.Check(host.Gone.Count == 0, "Disconnect returns before PeerDisconnected is raised");
+        TestKit.Check(TestKit.WaitFor(delegate { return host.Gone.Count >= 1; }, 2000) && !host.InsideCall, "and it arrives through the queue");
+        TestKit.Check(TestKit.WaitFor(delegate { return guest.Closed.Count == 1; }, 2000), "the kicked member is told");
+
+        // the lobby itself is gone: now the room is lost, and Closed is posted, not raised inside Broadcast
+        Side g2 = new Side(hub, "G2", false, lobby);
+        TestKit.Check(TestKit.WaitFor(delegate { return g2.Connected == 1; }, 2000), "a second guest joins");
+        hub.Lobbies.Remove(lobby);
+        g2.Calling = true;
+        g2.T.Broadcast("anyone?");
+        g2.Calling = false;
+        TestKit.Check(g2.Closed.Count == 0, "Closed is not raised inside Broadcast");
+        TestKit.Check(TestKit.WaitFor(delegate { return g2.Closed.Count == 1; }, 2000) && !g2.InsideCall, "a vanished lobby ends the room (after the call returned)");
+        TestKit.Pump(100);
+        TestKit.Check(g2.Closed.Count == 1, "exactly once");
+
+        // no context, no transport
+        string msg = null;
+        System.Threading.Thread t = new System.Threading.Thread(delegate()
+        {
+            try { SteamRoomTransport.Host(new FakeLobbyService(hub, "X"), "X"); msg = "no exception"; }
+            catch (InvalidOperationException ex) { msg = ex.Message; }
+        });
+        t.Start();
+        t.Join();
+        TestKit.Check(msg != null && msg.Contains("message loop"), "a thread without a UI context cannot create one: " + msg);
+        host.T.Close(); guest.T.Close(); g2.T.Close();
+        TestKit.Pump(50);
     }
 }

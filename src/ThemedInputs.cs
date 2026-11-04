@@ -16,26 +16,13 @@ namespace ChessGame
             IntegralHeight = false;
             ItemHeight = Ui.S(42);
             SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            ThemeWatch.Attach(this, delegate { BackColor = Theme.Current.Field; Invalidate(); });
         }
 
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
-            Theme.Changed += OnThemeChanged;
             BackColor = Theme.Current.Field;
-        }
-
-        protected override void OnHandleDestroyed(EventArgs e)
-        {
-            Theme.Changed -= OnThemeChanged;
-            base.OnHandleDestroyed(e);
-        }
-
-        void OnThemeChanged()
-        {
-            if (IsDisposed) return;
-            BackColor = Theme.Current.Field;
-            Invalidate();
         }
 
         protected override void OnDrawItem(DrawItemEventArgs e)
@@ -102,11 +89,10 @@ namespace ChessGame
             };
             Controls.Add(box);
             ApplyColors();
+            ThemeWatch.Attach(this, delegate { ApplyColors(); Invalidate(); });
         }
 
         public override string Text { get { return box.Text; } set { box.Text = value; } }
-
-        public void SelectAllText() { box.SelectAll(); }
 
         public new bool Focus() { return box.Focus(); }
 
@@ -121,21 +107,7 @@ namespace ChessGame
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
-            Theme.Changed += OnThemeChanged;
             ApplyColors();
-        }
-
-        protected override void OnHandleDestroyed(EventArgs e)
-        {
-            Theme.Changed -= OnThemeChanged;
-            base.OnHandleDestroyed(e);
-        }
-
-        void OnThemeChanged()
-        {
-            if (IsDisposed) return;
-            ApplyColors();
-            Invalidate();
         }
 
         protected override void OnLayout(LayoutEventArgs e)

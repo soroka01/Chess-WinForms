@@ -15,6 +15,7 @@ namespace ChessGame
         readonly FlatButton btnJoin = new FlatButton();
         readonly FlatButton btnRefresh = new FlatButton();
         readonly Timer autoRefresh = new Timer();
+        readonly Timer searchTimeout = new Timer();   // a search that never answers must not leave "Обновить" dead
         bool searching;
         bool disposed;
 
@@ -54,6 +55,7 @@ namespace ChessGame
             l1.SetBounds(pad, pad, w - pad * 2 - Ui.S(160), Ui.S(24));
             Controls.Add(l1);
             Label who = new Label();
+            who.UseMnemonic = false;   // the Steam name may contain '&'
             who.Text = "вы: " + service.MyName;
             who.Font = Ui.Font(9f);
             who.ForeColor = Theme.Current.Muted;
@@ -114,6 +116,8 @@ namespace ChessGame
 
             autoRefresh.Interval = 4000;
             autoRefresh.Tick += delegate { Search(); };
+            searchTimeout.Interval = 15000;
+            searchTimeout.Tick += delegate { searchTimeout.Stop(); searching = false; };
             Shown += delegate { Search(); autoRefresh.Start(); };
         }
 
@@ -122,12 +126,23 @@ namespace ChessGame
             if (searching || disposed) return;
             searching = true;
             lblInfo.Text = "Поиск игр в Steam…";
-            service.FindLobbies(delegate(List<LobbyInfo> found)
+            searchTimeout.Stop();
+            searchTimeout.Start();
+            try
             {
+                service.FindLobbies(delegate(List<LobbyInfo> found)
+                {
+                    searchTimeout.Stop();
+                    searching = false;
+                    if (disposed) return;
+                    ShowResults(found);
+                });
+            }
+            catch (Exception)
+            {
+                searchTimeout.Stop();
                 searching = false;
-                if (disposed) return;
-                ShowResults(found);
-            });
+            }
         }
 
         void ShowResults(List<LobbyInfo> found)
@@ -169,6 +184,7 @@ namespace ChessGame
             {
                 disposed = true;
                 autoRefresh.Dispose();
+                searchTimeout.Dispose();
             }
             base.Dispose(disposing);
         }

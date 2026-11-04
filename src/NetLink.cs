@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
@@ -142,7 +141,7 @@ namespace ChessGame
 
         void ReceiveLoop()
         {
-            byte[] buf = new byte[256];
+            byte[] buf = new byte[4096];   // an announcement is under 100 bytes; anything larger is not one
             while (!stopped)
             {
                 try
@@ -152,11 +151,19 @@ namespace ChessGame
                     string text = Encoding.UTF8.GetString(buf, 0, n);
                     string[] parts = text.Split('|');
                     int port;
-                    if (parts.Length != 3 || parts[0] != "CHESS1" || !int.TryParse(parts[1], out port) || port < 1 || port > 65535)
+                    // ports below 1024 are not where a game hub listens
+                    if (parts.Length != 3 || parts[0] != "CHESS1" || !int.TryParse(parts[1], out port) || port < 1024 || port > 65535)
                         continue;
                     string name = NetLink.Sanitize(parts[2]);
                     string address = ((IPEndPoint)remote).Address.ToString();
                     ui.Post(delegate(object state) { if (!stopped && Found != null) Found(name, address, port); }, null);
+                }
+                catch (SocketException ex)
+                {
+                    if (stopped) return;
+                    // an oversized datagram or a reset caused by an earlier send is just a bad datagram: next one, no pause
+                    if (ex.SocketErrorCode == SocketError.MessageSize || ex.SocketErrorCode == SocketError.ConnectionReset) continue;
+                    Thread.Sleep(200);
                 }
                 catch (Exception)
                 {

@@ -78,7 +78,18 @@ namespace ChessGame
         {
             if (t == null || t == current) return;
             current = t;
-            if (Changed != null) Changed();
+            Notify(Changed);
+        }
+
+        /// <summary>Calls every subscriber in turn; one that throws must not keep the others from repainting.</summary>
+        internal static void Notify(Action handlers)
+        {
+            if (handlers == null) return;
+            foreach (Delegate d in handlers.GetInvocationList())
+            {
+                try { ((Action)d)(); }
+                catch (Exception) { }
+            }
         }
 
         public static Theme FromName(string name)
@@ -116,7 +127,7 @@ namespace ChessGame
             i = ((i % All.Length) + All.Length) % All.Length;
             if (i == index) return;
             index = i;
-            if (Changed != null) Changed();
+            Theme.Notify(Changed);
         }
     }
 
@@ -253,11 +264,12 @@ namespace ChessGame
                     using (SolidBrush b = new SolidBrush(t.CardHover)) e.Graphics.FillRectangle(b, e.Bounds);
                     using (Pen p = new Pen(t.Border)) e.Graphics.DrawRectangle(p, 0, 0, e.Bounds.Width - 1, e.Bounds.Height - 1);
                     TextRenderer.DrawText(e.Graphics, e.ToolTipText, Font(9f), e.Bounds, t.Text,
-                        TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                        TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
                 };
                 tip.Popup += delegate(object s, PopupEventArgs e)
                 {
-                    Size sz = TextRenderer.MeasureText(tip.GetToolTip(e.AssociatedControl), Font(9f));
+                    Size sz = TextRenderer.MeasureText(tip.GetToolTip(e.AssociatedControl), Font(9f), Size.Empty,
+                        TextFormatFlags.Bottom | TextFormatFlags.NoPrefix);
                     e.ToolTipSize = new Size(sz.Width + S(18), sz.Height + S(10));
                 };
             }

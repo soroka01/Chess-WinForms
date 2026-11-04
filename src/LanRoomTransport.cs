@@ -23,6 +23,8 @@ namespace ChessGame
         const int HandshakeMs = 6000;
         const int MaxQueued = 8000;                   // lines waiting for a slow connection
         const int MaxPendingGreetings = 32;
+        const int MaxPendingPerIp = 6;
+        const int MaxAcceptFailures = 10;
         const int MaxRememberedKeys = 500;
         const int FlushGraceMs = 400;
         const int ProbeMs = 3000;
@@ -47,7 +49,9 @@ namespace ChessGame
         readonly Dictionary<string, string> keyToId = new Dictionary<string, string>();
         readonly Dictionary<string, string> idToKey = new Dictionary<string, string>();
         int counter;
-        int pending;
+        readonly object pendingLock = new object();
+        readonly Dictionary<string, int> pendingByIp = new Dictionary<string, int>();
+        int pending;   // greetings in progress (guarded by pendingLock)
 
         int closed;
         int started;
@@ -63,7 +67,7 @@ namespace ChessGame
 
         LanRoomTransport(string name, string key)
         {
-            ui = SynchronizationContext.Current ?? new SynchronizationContext();
+            ui = UiContext.Capture("LanRoomTransport");
             myName = NetLink.Sanitize(name);
             string k = CleanKey(key);
             myKey = k.Length > 0 ? k : Guid.NewGuid().ToString("N");
@@ -89,9 +93,10 @@ namespace ChessGame
             t.isHost = true;
             t.connectedRaised = true;   // the hub's Connected is raised by the accept thread
             TcpListener l = new TcpListener(IPAddress.Any, port);
+            l.ExclusiveAddressUse = true;   // no other local process may share the hub port
             l.Start();
             t.listener = l;
-            t.starter = delegate { t.Raise(delegate { t.RaiseConnected(); }); t.AcceptLoop(l); };
+            t.starter = delegate { t.Post(delegate { t.RaiseConnected(); }); t.AcceptLoop(l); };
             return t;
         }
 
@@ -116,29 +121,91 @@ namespace ChessGame
 
         void AcceptLoop(TcpListener l)
         {
+            int failures = 0;
             while (true)
             {
                 TcpClient c;
                 try
                 {
+                    InjectedAcceptFault();
                     c = l.AcceptTcpClient();
+                    failures = 0;
                 }
                 catch (Exception)
                 {
                     if (IsClosed || !IsCurrentListener(l)) return;   // stopped on purpose
-                    Fail("Ожидание соединений прервано");
-                    return;
+                    // out of buffers, a connection reset before accept and the like are transient: wait a little and go on
+                    if (++failures > MaxAcceptFailures)
+                    {
+                        Fail("Ожидание соединений прервано");
+                        return;
+                    }
+                    Thread.Sleep(Math.Min(500, 50 * failures));
+                    continue;
                 }
-                if (Interlocked.Increment(ref pending) > MaxPendingGreetings)
+
+                string ip = "";
+                try { ip = RemoteAddress(c); } catch (Exception) { }
+                if (!TryEnterGreeting(ip))
                 {
-                    Interlocked.Decrement(ref pending);
                     try { c.Close(); } catch (Exception) { }
                     continue;
                 }
-                TcpClient client = c;
-                Thread t = new Thread(delegate() { PeerThread(client); });
-                t.IsBackground = true;
-                t.Start();
+                try
+                {
+                    TcpClient client = c;
+                    string address = ip;
+                    Thread t = new Thread(delegate() { PeerThread(client, address); });
+                    t.IsBackground = true;
+                    t.Start();
+                }
+                catch (Exception)
+                {
+                    // no thread for this connection (out of memory): refuse it, keep the room
+                    LeaveGreeting(ip);
+                    try { c.Close(); } catch (Exception) { }
+                    Thread.Sleep(100);
+                }
+            }
+        }
+
+        /// <summary>Tests: the next accepts fail with a transient socket error.</summary>
+        internal static int InjectAcceptFaults;
+
+        static void InjectedAcceptFault()
+        {
+            while (true)
+            {
+                int n = Thread.VolatileRead(ref InjectAcceptFaults);
+                if (n <= 0) return;
+                if (Interlocked.CompareExchange(ref InjectAcceptFaults, n - 1, n) == n)
+                    throw new SocketException((int)SocketError.NoBufferSpaceAvailable);
+            }
+        }
+
+        /// <summary>A greeting slot: bounded in total and per remote address, so that a few silent sockets cannot lock everybody out.</summary>
+        bool TryEnterGreeting(string ip)
+        {
+            lock (pendingLock)
+            {
+                int n;
+                pendingByIp.TryGetValue(ip, out n);
+                if (pending >= MaxPendingGreetings || n >= MaxPendingPerIp) return false;
+                pending++;
+                pendingByIp[ip] = n + 1;
+                return true;
+            }
+        }
+
+        void LeaveGreeting(string ip)
+        {
+            lock (pendingLock)
+            {
+                pending--;
+                int n;
+                if (!pendingByIp.TryGetValue(ip, out n)) return;
+                if (n <= 1) pendingByIp.Remove(ip);
+                else pendingByIp[ip] = n - 1;
             }
         }
 
@@ -147,17 +214,24 @@ namespace ChessGame
             lock (gate) { return listener == l; }
         }
 
-        void PeerThread(TcpClient c)
+        void PeerThread(TcpClient c, string address)
         {
             Peer peer = null;
             bool greeting = true;
+            int handshake = 0;   // 0 = greeting in progress, 1 = greeting read in time, 2 = the deadline passed
+            System.Threading.Timer deadline = null;
             try
             {
                 c.NoDelay = true;
                 KeepAlive(c);
-                string address = "";
-                try { address = RemoteAddress(c); } catch (Exception) { }
                 c.ReceiveTimeout = HandshakeMs;
+                // ReceiveTimeout is per read: a peer sending a byte every few seconds would keep the slot for ever,
+                // so the whole greeting has a deadline of its own
+                deadline = new System.Threading.Timer(delegate(object state)
+                {
+                    if (Interlocked.CompareExchange(ref handshake, 2, 0) == 0)
+                        try { c.Close(); } catch (Exception) { }
+                }, null, HandshakeMs, Timeout.Infinite);
                 StreamReader reader = new StreamReader(c.GetStream(), Encoding.UTF8);
 
                 string first = ReadLine(reader, MaxLine);
@@ -175,6 +249,9 @@ namespace ChessGame
                     return;
                 }
 
+                if (Interlocked.CompareExchange(ref handshake, 1, 0) != 0) return;   // too late, the deadline closed it
+                deadline.Dispose();
+
                 Peer replaced;
                 bool full;
                 peer = Register(c, name, key, address, out replaced, out full);
@@ -186,12 +263,12 @@ namespace ChessGame
                 }
                 c.ReceiveTimeout = 0;
                 greeting = false;
-                Interlocked.Decrement(ref pending);
+                LeaveGreeting(address);
 
-                // an old connection of the same client (it reconnected before we noticed the loss) ends first
-                if (replaced != null) EndPeer(replaced, true);
+                // an old connection of the same client (it reconnected before we noticed the loss): Register announced its end
+                // before the arrival of the new one; here its socket is closed
+                if (replaced != null) replaced.Link.Close();
                 Peer p = peer;
-                Post(delegate { RaisePeerConnected(p.Id, p.Name); });
 
                 int count = 0;
                 int windowStart = Environment.TickCount;
@@ -211,7 +288,8 @@ namespace ChessGame
             }
             finally
             {
-                if (greeting) Interlocked.Decrement(ref pending);
+                if (deadline != null) deadline.Dispose();
+                if (greeting) LeaveGreeting(address);
                 if (peer != null) EndPeer(peer, true);
                 else { try { c.Close(); } catch (Exception) { } }
             }
@@ -279,7 +357,17 @@ namespace ChessGame
                 peer.Address = address;
                 peer.Link = new Link(c, delegate(Link l) { EndPeer(peer, true); });
                 peer.Link.Send("WELCOME " + id + " " + myId);
+                // Both events are posted here, under the lock that also guards removal (see EndPeer), so that the order of
+                // "old connection gone", "new one arrived" and a later "gone" is the order in which things happened.
+                if (old != null)
+                {
+                    Interlocked.Exchange(ref old.Ended, 1);
+                    string oldId = old.Id;
+                    Post(delegate { RaisePeerDisconnected(oldId); });
+                }
                 peers[id] = peer;
+                string newId = id;
+                Post(delegate { RaisePeerConnected(newId, name); });
                 replaced = old;
                 return peer;
             }
@@ -356,10 +444,14 @@ namespace ChessGame
             lock (gate)
             {
                 Peer cur;
-                if (peers.TryGetValue(p.Id, out cur) && cur == p) peers.Remove(p.Id);
+                // a peer replaced by a newer connection of the same client was announced as gone by Register
+                if (peers.TryGetValue(p.Id, out cur) && cur == p)
+                {
+                    peers.Remove(p.Id);
+                    if (announce) { string id = p.Id; Post(delegate { RaisePeerDisconnected(id); }); }
+                }
             }
             p.Link.Close();
-            if (announce) { string id = p.Id; Post(delegate { RaisePeerDisconnected(id); }); }
         }
 
         // ------------------------------------------------------------ client
@@ -424,11 +516,11 @@ namespace ChessGame
                 else
                 {
                     string why;
-                    if (first == "FULL") why = "комната заполнена";
+                    if (first == null) why = "хост закрыл соединение";
+                    else if (first == "FULL") why = "комната заполнена";
                     else if (first == "BAD") why = "хост не принял соединение";
                     else if (first == "BADVERSION" || first == "CHESS" || first.StartsWith("CHESS ", StringComparison.Ordinal))
                         why = "у хоста другая версия программы, обновите её";
-                    else if (first == null) why = "хост закрыл соединение";
                     else why = "это не шахматная комната";
                     FailUp(gen, moving ? MoveFailed : "Не удалось подключиться: " + why);
                     return;
@@ -590,6 +682,7 @@ namespace ChessGame
                 if (IsClosed || isHost || up == null || myId == null)
                     throw new InvalidOperationException("only a connected client can become the hub");
                 l = new TcpListener(IPAddress.Any, preferredPort);
+                l.ExclusiveAddressUse = true;
                 l.Start();   // a busy port throws before anything changes
 
                 keyToId.Clear();
@@ -738,11 +831,6 @@ namespace ChessGame
         void Post(Action action)
         {
             ui.Post(delegate(object state) { if (!IsClosed) action(); }, null);
-        }
-
-        void Raise(Action action)
-        {
-            Post(action);
         }
 
         void RaiseConnected() { if (Connected != null) Connected(); }
@@ -904,23 +992,28 @@ namespace ChessGame
 
             void Fail()
             {
-                bool wasDead;
-                lock (queue) { wasDead = dead; }
-                Close();
-                if (!wasDead && failed != null) failed(this);
+                // only the caller that really ended the link reports it, even when several fail at the same moment
+                if (CloseOnce() && failed != null) failed(this);
             }
 
             public void Close()
             {
+                CloseOnce();
+            }
+
+            /// <summary>True for the one call that closed the link.</summary>
+            bool CloseOnce()
+            {
                 lock (queue)
                 {
-                    if (dead) return;
+                    if (dead) return false;
                     dead = true;
                     queue.Clear();
                     Monitor.PulseAll(queue);
                 }
                 try { tcp.Client.Shutdown(SocketShutdown.Send); } catch (Exception) { }
                 try { tcp.Close(); } catch (Exception) { }
+                return true;
             }
         }
     }

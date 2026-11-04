@@ -116,6 +116,77 @@ static class Tests
         Check(castles == 1, "king side castle blocked by attacked f1: " + castles);
     }
 
+    static bool Rejects(string fen)
+    {
+        try { Position.FromFen(fen); return false; }
+        catch (FormatException) { return true; }
+    }
+
+    static void TestFen()
+    {
+        Console.WriteLine("FEN");
+
+        // a position reached by playing and the same position loaded from its FEN are the same position (same hash):
+        // the repetition count compares hashes, so this is what makes repetitions across a loaded FEN work
+        Game g = new Game();
+        string[][] lines =
+        {
+            new string[] { "e2e4" },                                           // en passant square set, nobody can use it
+            new string[] { "e2e4", "d7d5", "e4e5", "f7f5" },                   // en passant square set and usable (e5xf6)
+            new string[] { "e2e4", "a7a6", "e4e5", "d7d5", "e5d6" },           // after the capture
+            new string[] { "g1f3", "g8f6", "e2e3", "e7e6", "f1e2", "f8e7", "e1g1" },
+        };
+        foreach (string[] line in lines)
+        {
+            g.NewGame();
+            Play(g, line);
+            Position loaded = Position.FromFen(g.Pos.ToFen());
+            Check(loaded.Hash == g.Pos.Hash, "FEN round trip keeps the hash: " + string.Join(" ", line));
+            Check(loaded.ToFen() == g.Pos.ToFen(), "FEN round trip keeps the text: " + g.Pos.ToFen());
+        }
+
+        // an en passant square that nobody can use is dropped when loading; a usable one is kept
+        Position useless = Position.FromFen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1");
+        Position played = Position.Start();
+        Game one = new Game();
+        Play(one, "e2e4");
+        Check(useless.Hash == one.Pos.Hash && useless.Ep < 0, "an unusable en passant square is dropped");
+        Position usable = Position.FromFen("rnbqkbnr/ppp1pppp/8/8/3pP3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 3");
+        Check(usable.Ep == Sqr.Parse("e3"), "a usable en passant square is kept");
+        Check(played.ToFen() == Position.StartFen, "Position.Start is the start position");
+
+        // castling rights that cannot exist are dropped
+        Position noRook = Position.FromFen("4k3/8/8/8/8/8/8/4K3 w KQkq - 0 1");
+        Check(noRook.Castle == 0, "castling rights without king and rook at home are dropped");
+
+        // defaults for the optional fields
+        Position bare = Position.FromFen("4k3/8/8/8/8/8/8/4K3");
+        Check(bare.WhiteToMove && bare.Half == 0 && bare.Full == 1, "missing fields get their defaults");
+
+        // positions that cannot occur are refused with FormatException
+        string[] bad =
+        {
+            "", "   ", "8/8/8/8/8/8/8", "4k3/8/8/8/8/8/8/4K3/8", "4k3/8/8/8/8/8/8/4K2 w - - 0 1", "4k3/8/8/8/8/8/8/4K4 w - - 0 1",
+            "44/8/8/8/8/8/8/4K3 w - - 0 1", "4k3/8/8/8/8/8/8/4X3 w - - 0 1", "8/8/8/8/8/8/8/4K3 w - - 0 1", "4k3/8/8/8/8/8/8/8 w - - 0 1",
+            "4kk2/8/8/8/8/8/8/4K3 w - - 0 1", "4k3/8/8/8/8/8/8/4K3 x - - 0 1", "4k3/8/8/8/8/8/8/4K3 w KX - 0 1",
+            "4k3/8/8/8/8/8/8/4K3 w - e 0 1", "4k3/8/8/8/8/8/8/4K3 w - zz 0 1", "4k3/8/8/8/8/8/8/4K3 w - e4 0 1", "4k3/8/8/8/8/8/8/4K3 w - e3 0 1",
+            "4k3/8/8/8/8/8/8/4K3 w - - x 1", "4k3/8/8/8/8/8/8/4K3 w - - -1 1", "4k3/8/8/8/8/8/8/4K3 w - - 0 0", "4k3/8/8/8/8/8/8/4K3 w - - 0 x",
+            "P3k3/8/8/8/8/8/8/4K3 w - - 0 1", "4k3/8/8/8/8/8/8/p3K3 w - - 0 1",
+        };
+        foreach (string fen in bad) Check(Rejects(fen), "FEN refused: '" + fen + "'");
+        Check(Rejects(null), "null FEN refused");
+
+        // a refused FEN leaves a game exactly as it was
+        Game keep = new Game();
+        Play(keep, "e2e4", "e7e5");
+        string before = keep.Pos.ToFen();
+        int plies = keep.PlyCount;
+        bool threw = false;
+        try { keep.LoadFen("not a fen"); } catch (FormatException) { threw = true; }
+        Check(threw && keep.Pos.ToFen() == before && keep.PlyCount == plies, "LoadFen with a bad FEN changes nothing");
+        Check(keep.PositionAfter(1).ToFen() == one.Pos.ToFen(), "and the history still replays from the right start");
+    }
+
     static void TestEngine()
     {
         Console.WriteLine("engine");
@@ -184,6 +255,7 @@ static class Tests
         RunPerft("position6", "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10", 46, 2079, 89890);
 
         TestGameRules();
+        TestFen();
         TestEngine();
         SelfPlay(3, 2, 120);
 

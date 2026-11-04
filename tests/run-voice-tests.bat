@@ -1,5 +1,5 @@
 @echo off
-rem Compiles src\Voice.cs (it needs no other file) together with tests\VoiceTests.cs and runs the checks.
+rem Compiles the voice sources (they need no other src file) together with tests\VoiceTests.cs and runs the checks.
 rem Fake devices only; real playback gets silence and the microphone is never opened.
 setlocal
 cd /d "%~dp0\.."
@@ -9,6 +9,6 @@ if not exist "%CSC%" set CSC=%WINDIR%\Microsoft.NET\Framework\v4.0.30319\csc.exe
 
 if not exist tests\bin mkdir tests\bin
 "%CSC%" /nologo /optimize+ /target:exe /main:VoiceTests /out:tests\bin\VoiceTests.exe /reference:System.dll /reference:System.Core.dll ^
-    tests\VoiceTests.cs src\Voice.cs
+    tests\VoiceTests.cs src\Voice*.cs src\AdpcmCodec.cs src\AudioDevices.cs src\WinMmInterop.cs src\WaveInCapture.cs src\WaveOutPlayback.cs
 if errorlevel 1 exit /b 1
 tests\bin\VoiceTests.exe

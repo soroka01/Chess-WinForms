@@ -57,6 +57,8 @@ namespace ChessGame
         {
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer
                 | ControlStyles.ResizeRedraw, true);
+            SetStyle(ControlStyles.Selectable, false);
+            ThemeWatch.Attach(this, delegate { Invalidate(); });
             Height = Ui.S(56);
             thinkTimer.Interval = 380;
             thinkTimer.Tick += delegate { dots = (dots + 1) % 4; Invalidate(); };
@@ -105,20 +107,6 @@ namespace ChessGame
             advantage = materialAdvantage;
             Invalidate();
         }
-
-        protected override void OnHandleCreated(EventArgs e)
-        {
-            base.OnHandleCreated(e);
-            Theme.Changed += OnThemeChanged;
-        }
-
-        protected override void OnHandleDestroyed(EventArgs e)
-        {
-            Theme.Changed -= OnThemeChanged;
-            base.OnHandleDestroyed(e);
-        }
-
-        void OnThemeChanged() { if (!IsDisposed) Invalidate(); }
 
         protected override void Dispose(bool disposing)
         {
@@ -182,13 +170,10 @@ namespace ChessGame
                 Size ns = Ui.Measure(g, playerName, nameFont);
                 int bx = textX + Math.Min(ns.Width, nameRect.Width) + Ui.S(10);
                 int baseline = hasSubtitle ? nameRect.Y + Ui.S(17) : Height / 2 + Ui.S(8);
-                using (SolidBrush bars = new SolidBrush(t.Accent))
+                for (int i = 0; i < 3; i++)
                 {
-                    for (int i = 0; i < 3; i++)
-                    {
-                        int h = Ui.S(4) + (int)((Math.Sin(speakPhase * 0.95 + i * 1.9) + 1.0) * Ui.S(4.5f));
-                        Ui.FillRound(g, t.Accent, new RectangleF(bx + i * Ui.S(6), baseline - h, Ui.S(3.5f), h), Ui.S(1.5f));
-                    }
+                    int h = Ui.S(4) + (int)((Math.Sin(speakPhase * 0.95 + i * 1.9) + 1.0) * Ui.S(4.5f));
+                    Ui.FillRound(g, t.Accent, new RectangleF(bx + i * Ui.S(6), baseline - h, Ui.S(3.5f), h), Ui.S(1.5f));
                 }
             }
             Ui.Text(g, subtitle, Ui.Font(8.5f), t.Muted, new Rectangle(textX, Ui.S(29), Math.Max(0, Width / 2 - textX), Ui.S(18)),
@@ -241,6 +226,8 @@ namespace ChessGame
         {
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer
                 | ControlStyles.ResizeRedraw, true);
+            SetStyle(ControlStyles.Selectable, false);
+            ThemeWatch.Attach(this, delegate { Invalidate(); });
             Height = Ui.S(74);
             pulse.Interval = 90;
             pulse.Tick += delegate { phase = (phase + 1) % 24; Invalidate(); };
@@ -264,20 +251,6 @@ namespace ChessGame
             }
             Invalidate();
         }
-
-        protected override void OnHandleCreated(EventArgs e)
-        {
-            base.OnHandleCreated(e);
-            Theme.Changed += OnThemeChanged;
-        }
-
-        protected override void OnHandleDestroyed(EventArgs e)
-        {
-            Theme.Changed -= OnThemeChanged;
-            base.OnHandleDestroyed(e);
-        }
-
-        void OnThemeChanged() { if (!IsDisposed) Invalidate(); }
 
         protected override void Dispose(bool disposing)
         {

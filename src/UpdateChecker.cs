@@ -9,7 +9,7 @@ using System.Windows.Forms;
 namespace ChessGame
 {
     /// <summary>The newest release published on GitHub.</summary>
-    public sealed class UpdateInfo
+    internal sealed class UpdateInfo
     {
         public string Tag = "";      // "v1.2.0"
         public Version Latest;       // 1.2.0.0
@@ -23,10 +23,10 @@ namespace ChessGame
     /// Asks GitHub for the latest release of the game and compares it with this build. Nothing is downloaded or installed:
     /// the game only tells that a newer version exists and opens its page.
     /// </summary>
-    public static class UpdateChecker
+    internal static class UpdateChecker
     {
         /// <summary>Tests switch this off: no network traffic, no notices.</summary>
-        public static bool Enabled = true;
+        internal static bool Enabled = true;
 
         const int HoursBetweenChecks = 6;
 
@@ -69,7 +69,9 @@ namespace ChessGame
 
         static string FetchLatestRelease()
         {
-            try { ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072; } catch (Exception) { }   // TLS 1.2
+            // The exe has no target-framework attribute, so .NET uses legacy defaults (SSL 3 + TLS 1.0): GitHub needs TLS 1.2, and the
+            // old protocols must not stay enabled next to it.
+            try { ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12; } catch (Exception) { }
             HttpWebRequest request = (HttpWebRequest)WebRequest.Create("https://api.github.com/repos/" + AppInfo.Repository + "/releases/latest");
             request.UserAgent = "Chess-WinForms/" + AppInfo.Version;
             request.Accept = "application/vnd.github+json";
@@ -86,16 +88,28 @@ namespace ChessGame
         }
 
         /// <summary>
-        /// Looks the newest release up on a pool thread; 'done' runs on the UI thread of 'ui' with null if the check failed
-        /// (no internet, GitHub busy, no releases yet).
+        /// Looks the newest release up on a pool thread and records the attempt. 'done' runs on the UI thread of 'ui' with null if the
+        /// check failed (no internet, GitHub busy, no releases yet). If the window cannot take it any more (closed, no handle),
+        /// 'notDelivered' runs instead, on the pool thread: exactly one of the two always runs.
         /// </summary>
-        public static void CheckAsync(Control ui, Action<UpdateInfo> done)
+        public static void CheckAsync(Control ui, Action<UpdateInfo> done, Action notDelivered)
         {
             ThreadPool.QueueUserWorkItem(delegate
             {
                 UpdateInfo info = null;
                 try { info = Parse(Fetch(), Current); } catch (Exception) { }
-                try { ui.BeginInvoke(new Action(delegate { done(info); })); } catch (Exception) { }   // the window may be gone already
+                Record(info);
+                bool posted = false;
+                try
+                {
+                    ui.BeginInvoke(new Action(delegate { done(info); }));
+                    posted = true;
+                }
+                catch (Exception) { }   // the window may be gone already
+                if (!posted && notDelivered != null)
+                {
+                    try { notDelivered(); } catch (Exception) { }
+                }
             });
         }
 
@@ -120,9 +134,13 @@ namespace ChessGame
             return age.TotalHours >= HoursBetweenChecks || age.TotalSeconds < 0;
         }
 
+        /// <summary>
+        /// Notes that a check was made now, whatever it found (null = it failed): a failing network is then retried at the normal
+        /// interval, not at every start. The release found, if any, is remembered too.
+        /// </summary>
         public static void Record(UpdateInfo info)
         {
-            Settings.Set("update.tag", info.Tag);
+            if (info != null) Settings.Set("update.tag", info.Tag);
             Settings.Set("update.at", DateTime.UtcNow.Ticks.ToString());
             Settings.Save();
         }

@@ -13,7 +13,7 @@ namespace ChessGame
     /// The participants of a room: avatar, name, role, host / seat / mute marks and a "talking" indicator.
     /// Owner-drawn; wheel scrolling and a thin own scrollbar like MoveListControl. A click on a row raises PersonClicked.
     /// </summary>
-    public sealed class PeopleList : Control
+    public sealed class PeopleList : Control, IWheelTarget
     {
         public sealed class Person
         {
@@ -40,13 +40,10 @@ namespace ChessGame
         readonly List<Row> rows = new List<Row>();
         readonly Timer speakTimer = new Timer();
         int speakPhase;
-        int scroll;                 // pixels
+        readonly ThinScrollbar bar;
         int hoverRow = -1;
         int pressedRow = -1;
         Point lastMouse = new Point(-1, -1);
-        bool thumbDrag;
-        int thumbGrab;
-        bool thumbHover;
 
         /// <summary>A left click on a row. The point (screen coordinates) is just under the row: where a menu should open.</summary>
         public event Action<Person, Point> PersonClicked;
@@ -54,8 +51,11 @@ namespace ChessGame
         public PeopleList()
         {
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer
-                | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
+                | ControlStyles.ResizeRedraw, true);
+            SetStyle(ControlStyles.Selectable, false);   // hovering or clicking must not take the focus from the chat box; the wheel comes through WheelRouter
             TabStop = false;
+            bar = new ThinScrollbar(this, delegate { return ContentH; });
+            ThemeWatch.Attach(this, delegate { Invalidate(); });
             speakTimer.Interval = 110;
             speakTimer.Tick += delegate { OnSpeakTick(); };
         }
@@ -63,8 +63,7 @@ namespace ChessGame
         Theme T { get { return Theme.Current; } }
         int RowH { get { return Ui.S(52); } }
         int ContentH { get { return rows.Count * RowH + Ui.S(8); } }
-        int MaxScroll { get { return Math.Max(0, ContentH - Height); } }
-        int ListW { get { return Width - (MaxScroll > 0 ? Ui.S(10) : 0); } }
+        int ListW { get { return Width - (bar.MaxOffset > 0 ? Ui.S(10) : 0); } }
 
         public int Count { get { return rows.Count; } }
 
@@ -95,7 +94,7 @@ namespace ChessGame
             rows.AddRange(next);
             if (all || changed.Count > 0)
             {
-                if (scroll > MaxScroll) scroll = MaxScroll;
+                bar.Clamp();
                 UpdateHover(lastMouse);
                 if (all || changed.Count * 2 > rows.Count) Invalidate();
                 else foreach (int i in changed) InvalidateRow(i);
@@ -141,7 +140,7 @@ namespace ChessGame
 
         void InvalidateRow(int i)
         {
-            Rectangle r = new Rectangle(0, i * RowH - scroll, Width, RowH);
+            Rectangle r = new Rectangle(0, i * RowH - bar.Offset, Width, RowH);
             if (r.Bottom >= 0 && r.Top <= Height) Invalidate(r);
         }
 
@@ -151,46 +150,23 @@ namespace ChessGame
             base.Dispose(disposing);
         }
 
-        protected override void OnHandleCreated(EventArgs e)
-        {
-            base.OnHandleCreated(e);
-            Theme.Changed += OnThemeChanged;
-        }
-
-        protected override void OnHandleDestroyed(EventArgs e)
-        {
-            Theme.Changed -= OnThemeChanged;
-            base.OnHandleDestroyed(e);
-        }
-
-        void OnThemeChanged() { if (!IsDisposed) Invalidate(); }
-
         // ------------------------------------------------------------ geometry
-
-        RectangleF ThumbRect()
-        {
-            if (MaxScroll <= 0) return RectangleF.Empty;
-            float trackH = Height - Ui.S(8);
-            float thumbH = Math.Max(Ui.S(28), trackH * Height / ContentH);
-            float y = Ui.S(4) + (trackH - thumbH) * scroll / MaxScroll;
-            return new RectangleF(Width - Ui.S(8), y, Ui.S(5), thumbH);
-        }
 
         int RowAt(Point p)
         {
             if (p.X < 0 || p.X >= ListW || p.Y < 0 || p.Y >= Height) return -1;
-            int row = (p.Y + scroll) / RowH;
+            int row = (p.Y + bar.Offset) / RowH;
             return row >= 0 && row < rows.Count ? row : -1;
         }
 
         void UpdateHover(Point p)
         {
-            int row = thumbDrag ? -1 : RowAt(p);
-            bool overThumb = MaxScroll > 0 && p.X >= Width - Ui.S(12) && p.X < Width && p.Y >= 0 && p.Y < Height;
-            if (row != hoverRow || overThumb != thumbHover)
+            int row = bar.Dragging ? -1 : RowAt(p);
+            bool overThumb = bar.InGutter(p.X) && p.X < Width && p.Y >= 0 && p.Y < Height;
+            if (row != hoverRow || overThumb != bar.Hover)
             {
                 hoverRow = row;
-                thumbHover = overThumb;
+                bar.Hover = overThumb;
                 Cursor = row >= 0 ? Cursors.Hand : Cursors.Default;
                 Invalidate();
             }
@@ -198,21 +174,12 @@ namespace ChessGame
 
         // ------------------------------------------------------------ input
 
-        protected override void OnMouseEnter(EventArgs e)
-        {
-            if (!Focused) Focus();   // so that the wheel works without clicking first
-            base.OnMouseEnter(e);
-        }
-
         protected override void OnMouseMove(MouseEventArgs e)
         {
             lastMouse = e.Location;
-            if (thumbDrag)
+            if (bar.Dragging)
             {
-                float trackH = Height - Ui.S(8);
-                RectangleF th = ThumbRect();
-                float range = trackH - th.Height;
-                if (range > 0) scroll = (int)Math.Max(0, Math.Min(MaxScroll, (e.Y - thumbGrab - Ui.S(4)) / range * MaxScroll));
+                bar.DragTo(e.Y);
                 Invalidate();
             }
             else UpdateHover(e.Location);
@@ -222,11 +189,11 @@ namespace ChessGame
         protected override void OnMouseLeave(EventArgs e)
         {
             lastMouse = new Point(-1, -1);
-            if (hoverRow != -1 || thumbHover || pressedRow != -1)
+            if (hoverRow != -1 || bar.Hover || pressedRow != -1)
             {
                 hoverRow = -1;
                 pressedRow = -1;
-                thumbHover = false;
+                bar.Hover = false;
                 Cursor = Cursors.Default;
                 Invalidate();
             }
@@ -237,13 +204,7 @@ namespace ChessGame
         {
             if (e.Button == MouseButtons.Left)
             {
-                if (MaxScroll > 0 && e.X >= Width - Ui.S(12))
-                {
-                    RectangleF th = ThumbRect();
-                    thumbDrag = true;
-                    thumbGrab = th.Contains(e.Location) ? (int)(e.Y - th.Y) : (int)(th.Height / 2);
-                    OnMouseMove(e);
-                }
+                if (bar.BeginDrag(e.Location)) OnMouseMove(e);
                 else
                 {
                     pressedRow = RowAt(e.Location);
@@ -255,9 +216,8 @@ namespace ChessGame
 
         protected override void OnMouseUp(MouseEventArgs e)
         {
-            if (thumbDrag)
+            if (bar.EndDrag())
             {
-                thumbDrag = false;
                 UpdateHover(e.Location);
             }
             else if (e.Button == MouseButtons.Left)
@@ -268,7 +228,7 @@ namespace ChessGame
                 if (pressed >= 0) InvalidateRow(pressed);
                 if (row >= 0 && row == pressed && PersonClicked != null)
                 {
-                    int bottom = Math.Min(Height, (row + 1) * RowH - scroll);
+                    int bottom = Math.Min(Height, (row + 1) * RowH - bar.Offset);
                     PersonClicked(rows[row].Src, PointToScreen(new Point(Ui.S(10), bottom)));
                 }
             }
@@ -277,9 +237,7 @@ namespace ChessGame
 
         protected override void OnMouseWheel(MouseEventArgs e)
         {
-            int old = scroll;
-            scroll = Math.Max(0, Math.Min(MaxScroll, scroll - Math.Sign(e.Delta) * RowH));
-            if (scroll != old)
+            if (bar.Wheel(e.Delta, RowH))
             {
                 UpdateHover(lastMouse);
                 Invalidate();
@@ -287,9 +245,14 @@ namespace ChessGame
             base.OnMouseWheel(e);
         }
 
+        void IWheelTarget.Wheel(int delta)
+        {
+            OnMouseWheel(new MouseEventArgs(MouseButtons.None, 0, Width / 2, Height / 2, delta));
+        }
+
         protected override void OnSizeChanged(EventArgs e)
         {
-            if (scroll > MaxScroll) scroll = MaxScroll;
+            bar.Clamp();
             base.OnSizeChanged(e);
         }
 
@@ -337,22 +300,16 @@ namespace ChessGame
                 return;
             }
 
-            int first = Math.Max(0, scroll / RowH);
+            int first = Math.Max(0, bar.Offset / RowH);
             for (int i = first; i < rows.Count; i++)
             {
-                int y = i * RowH - scroll;
+                int y = i * RowH - bar.Offset;
                 if (y > Height) break;
                 if (y + RowH < e.ClipRectangle.Top || y > e.ClipRectangle.Bottom) continue;
                 DrawRow(g, rows[i].Snap, new Rectangle(0, y, ListW, RowH), i == pressedRow && i == hoverRow, i == hoverRow, bg);
             }
 
-            RectangleF thumb = ThumbRect();
-            if (!thumb.IsEmpty)
-            {
-                float w = thumbHover || thumbDrag ? Ui.S(6) : Ui.S(4);
-                RectangleF tr = new RectangleF(Width - Ui.S(6) - w / 2f, thumb.Y, w, thumb.Height);
-                Ui.FillRound(g, Ui.Alpha(t.Muted, thumbHover || thumbDrag ? 200 : 120), tr, w / 2f);
-            }
+            bar.Paint(g, t);
         }
 
         void DrawRow(Graphics g, Person p, Rectangle cell, bool pressed, bool hover, Color bg)
@@ -548,13 +505,6 @@ namespace ChessGame
             if (f != null && !f.IsDisposed) f.Close();
         }
 
-        /// <summary>The menu as a bitmap (card plus shadow), for tests: hover = index of the highlighted item or -1.</summary>
-        internal static Bitmap Render(IList<Item> items, int hover)
-        {
-            using (PopupForm f = new PopupForm(items, Point.Empty))
-                return f.RenderBitmap(hover, -1);
-        }
-
         sealed class PopupForm : Form
         {
             const int WS_EX_LAYERED = 0x80000, WS_EX_TOOLWINDOW = 0x80;
@@ -624,6 +574,7 @@ namespace ChessGame
                     cy = above >= wa.Top ? above : Math.Max(wa.Top, wa.Bottom - cardSize.Height);
                 }
                 Bounds = new Rectangle(cx - margin, cy - margin, cardSize.Width + margin * 2, cardSize.Height + margin * 2);
+                ThemeWatch.Attach(this, delegate { if (!closing) Redraw(); });
             }
 
             protected override CreateParams CreateParams
@@ -637,20 +588,6 @@ namespace ChessGame
             }
 
             // ---- lifetime
-
-            protected override void OnHandleCreated(EventArgs e)
-            {
-                base.OnHandleCreated(e);
-                Theme.Changed += OnThemeChanged;
-            }
-
-            protected override void OnHandleDestroyed(EventArgs e)
-            {
-                Theme.Changed -= OnThemeChanged;
-                base.OnHandleDestroyed(e);
-            }
-
-            void OnThemeChanged() { if (!IsDisposed && !closing) Redraw(); }
 
             protected override void OnVisibleChanged(EventArgs e)
             {

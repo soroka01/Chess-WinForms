@@ -26,10 +26,18 @@ static class VoiceTests
         public bool StartResult = true;
         public string StartError = "";
         public int Starts, Stops, Disposes;
+        volatile bool failed;
+        // when set, Start announces itself and then blocks until StartRelease is set (a slow driver)
+        public ManualResetEvent StartEntered, StartRelease;
+
+        public bool Failed { get { return failed; } }
+        public void Fail() { failed = true; }
 
         public bool Start(out string error)
         {
             Starts++;
+            if (StartEntered != null) StartEntered.Set();
+            if (StartRelease != null) StartRelease.WaitOne(10000);
             error = StartResult ? null : StartError;
             return StartResult;
         }
@@ -47,9 +55,32 @@ static class VoiceTests
         readonly object gate = new object();
         readonly List<short[]> chunks = new List<short[]>();
         public int Starts, Stops, Disposes;
+        volatile bool failed;
+        // the first ThrowOnEnqueue calls throw instead of accepting the chunk
+        public int ThrowOnEnqueue;
 
-        public bool Start(out string error) { Starts++; error = null; return true; }
-        public void Enqueue(short[] pcm) { lock (gate) { chunks.Add(pcm); } }
+        public bool Failed { get { return failed; } }
+        public void Fail() { failed = true; }
+
+        // when set, Start announces itself and then blocks until StartRelease is set (a slow driver)
+        public ManualResetEvent StartEntered, StartRelease;
+
+        public bool Start(out string error)
+        {
+            Starts++;
+            if (StartEntered != null) StartEntered.Set();
+            if (StartRelease != null) StartRelease.WaitOne(10000);
+            error = null;
+            return true;
+        }
+        public void Enqueue(short[] pcm)
+        {
+            lock (gate)
+            {
+                if (ThrowOnEnqueue > 0) { ThrowOnEnqueue--; throw new InvalidOperationException("device hiccup"); }
+                chunks.Add(pcm);
+            }
+        }
         public void Stop() { Stops++; }
         public void Dispose() { Disposes++; }
         public int Count { get { lock (gate) { return chunks.Count; } } }
@@ -82,6 +113,11 @@ static class VoiceTests
             Channel = new VoiceChannel(delegate { return new FakeCapture(); }, delegate { return Playback; }, false);
         }
         public void Steps(int n) { for (int i = 0; i < n; i++) Channel.MixStep(); }
+    }
+
+    static void Steps(VoiceChannel ch, int n)
+    {
+        for (int i = 0; i < n; i++) ch.MixStep();
     }
 
     // ---- signal helpers ----
@@ -381,20 +417,16 @@ static class VoiceTests
         sc.Feed(10, false);
         Check(sc.Ch.TakeOutgoing().Length == 0, "10 noise-only frames: nothing is sent (DC offset is blocked)");
         Check(!sc.Ch.Transmitting, "not transmitting on noise");
-        Check(sc.Ch.MicLevel < 0.1f, "meter is low on room noise (" + sc.Ch.MicLevel.ToString("F2") + ")");
 
-        float maxLevel = 0;
         bool sawTransmit = false;
         List<string> sent = new List<string>();
         for (int f = 0; f < 20; f++)
         {
             sc.Feed(1, true);
-            maxLevel = Math.Max(maxLevel, sc.Ch.MicLevel);
             sawTransmit |= sc.Ch.Transmitting;
             sent.AddRange(sc.Ch.TakeOutgoing());
         }
         Check(sawTransmit && sc.Ch.Transmitting, "the gate opens on weak speech and stays open");
-        Check(maxLevel > 0.25f, "meter moves on quiet speech (" + maxLevel.ToString("F2") + ")");
 
         int speechSent = sent.Count;
         // hangover: the gate stays open ~500 ms after the last speech
@@ -475,7 +507,6 @@ static class VoiceTests
         Check(peak < 32700, "never clipped (peak " + peak + ")");
         Check(over == 0, "no sample close to full scale (" + over + ")");
         Check(steady > 2000 && steady < 3800, "loud speech is not amplified beyond the target (" + steady.ToString("F0") + ")");
-        Check(sc.Ch.MicLevel > 0.9f, "meter is almost full on loud speech");
         sc.Ch.Dispose();
 
         // pure front end: AGC must not pump up the background noise and must go back to a moderate gain
@@ -515,7 +546,7 @@ static class VoiceTests
         Console.WriteLine("channel");
         FakeCapture cap = new FakeCapture();
         VoiceChannel ch = new VoiceChannel(delegate { return cap; }, delegate { return new FakePlayback(); }, false);
-        Check(!ch.MicOpen && !ch.Transmitting && ch.MicLevel == 0f, "closed channel is idle");
+        Check(!ch.MicOpen && !ch.Transmitting, "closed channel is idle");
         string err;
         Check(ch.StartMic(out err), "StartMic ok");
         Check(ch.MicOpen && cap.Starts == 1, "mic open, Start called once");
@@ -537,10 +568,10 @@ static class VoiceTests
         Check(sizeOk, "every frame is 1072 base64 chars");
 
         cap.Feed(Tone(300, 8000, 0, N));
-        Check(ch.Transmitting && ch.MicLevel > 0f, "transmitting before StopMic");
+        Check(ch.Transmitting, "transmitting before StopMic");
         ch.StopMic();
         Check(cap.Stops >= 1 && cap.Disposes == 1, "StopMic stops and disposes the capture");
-        Check(!ch.MicOpen && !ch.Transmitting && ch.MicLevel == 0f, "after StopMic: closed, silent meter");
+        Check(!ch.MicOpen && !ch.Transmitting, "after StopMic: closed, not transmitting");
         cap.Feed(Tone(300, 8000, 0, N));
         Check(!ch.Transmitting, "frames after StopMic are ignored");
         ch.StopMic();
@@ -620,7 +651,7 @@ static class VoiceTests
         ch.Receive("", valid);
         ch.Receive(new string('x', 500), valid);
         Check(made.Count == 0, "garbage never creates the playback");
-        Check(ch.SenderCount == 0 && !ch.AnyoneSpeaking, "garbage creates no sender and nobody 'speaks'");
+        Check(ch.SenderCount == 0 && !ch.IsSpeaking("A"), "garbage creates no sender and nobody 'speaks'");
         ch.SetSenderMuted(null, true);
         ch.SetSenderMuted("", true);
         ch.ForgetSender(null);
@@ -636,19 +667,15 @@ static class VoiceTests
         Console.WriteLine("speaking indicators");
         Rig rig = new Rig();
         string p = Payload(Tone(440, 5000, 0, N));
-        Check(!rig.Channel.AnyoneSpeaking && rig.Channel.SpeakingIds().Length == 0, "silent at the start");
+        Check(!rig.Channel.IsSpeaking("alice") && !rig.Channel.IsSpeaking("bob"), "silent at the start");
         rig.Channel.Receive("alice", p);
         Check(rig.Channel.IsSpeaking("alice") && !rig.Channel.IsSpeaking("bob"), "alice speaks right after her frame");
-        Check(rig.Channel.AnyoneSpeaking, "AnyoneSpeaking");
         rig.Channel.Receive("bob", p);
-        string[] ids = rig.Channel.SpeakingIds();
-        Array.Sort(ids);
-        Check(ids.Length == 2 && ids[0] == "alice" && ids[1] == "bob", "SpeakingIds lists both");
+        Check(rig.Channel.IsSpeaking("alice") && rig.Channel.IsSpeaking("bob"), "both speak");
         Thread.Sleep(300);
         Check(rig.Channel.IsSpeaking("alice"), "still speaking after 300 ms");
         Thread.Sleep(350);
-        Check(!rig.Channel.IsSpeaking("alice") && !rig.Channel.AnyoneSpeaking && rig.Channel.SpeakingIds().Length == 0,
-            "not speaking ~650 ms after the last frame");
+        Check(!rig.Channel.IsSpeaking("alice") && !rig.Channel.IsSpeaking("bob"), "not speaking ~650 ms after the last frame");
 
         // forget / mute
         rig.Channel.Receive("alice", p);
@@ -852,7 +879,7 @@ static class VoiceTests
         Check(ch.SpeakerMuted, "SpeakerMuted getter");
         for (int i = 0; i < 5; i++) ch.Receive("A", payload);
         Check(made.Count == 0, "muted from the start: playback never created");
-        Check(!ch.AnyoneSpeaking && ch.SenderCount == 0, "muted: nobody counts as speaking");
+        Check(!ch.IsSpeaking("A") && ch.SenderCount == 0, "muted: nobody counts as speaking");
         ch.SpeakerMuted = false;
         ch.Receive("A", payload);
         Check(made.Count == 1 && made[0].Starts == 1, "unmuted: playback is created");
@@ -901,7 +928,7 @@ static class VoiceTests
         int before = pb.Count;
         Thread.Sleep(150);
         Check(pb.Count == before, "nothing is enqueued after Dispose");
-        Check(!d.MicOpen && !d.Transmitting && d.MicLevel == 0f && !d.AnyoneSpeaking, "idle after Dispose");
+        Check(!d.MicOpen && !d.Transmitting, "idle after Dispose");
         Check(d.TakeOutgoing().Length == 0, "TakeOutgoing after Dispose is empty");
 
         // the auto mixer plays a spurt to its end
@@ -955,11 +982,8 @@ static class VoiceTests
         while (feeder.IsAlive || receiver.IsAlive)
         {
             taken += ch.TakeOutgoing().Length;
-            float l = ch.MicLevel;
             bool t = ch.Transmitting;
-            bool s = ch.AnyoneSpeaking;
-            ch.SpeakingIds();
-            if (l < 0f || l > 1f) fault = true;
+            bool s = ch.IsSpeaking("r0");
             Thread.Sleep(1);
         }
         taken += ch.TakeOutgoing().Length;
@@ -970,12 +994,252 @@ static class VoiceTests
         Check(sw.ElapsedMilliseconds < 1000, "Dispose is prompt under load");
     }
 
+    // ---- broken devices, a throwing mixer step, slow drivers ----
+
+    static bool WaitUntil(Func<bool> condition, int timeoutMs)
+    {
+        Stopwatch sw = Stopwatch.StartNew();
+        while (!condition())
+        {
+            if (sw.ElapsedMilliseconds > timeoutMs) return false;
+            Thread.Sleep(5);
+        }
+        return true;
+    }
+
+    // runs the action on its own thread and reports whether it returned within the time limit
+    static bool ReturnsWithin(Action action, int timeoutMs)
+    {
+        Thread t = new Thread(delegate() { try { action(); } catch (Exception) { } });
+        t.IsBackground = true;
+        t.Start();
+        return t.Join(timeoutMs);
+    }
+
+    static void DeadDeviceTests()
+    {
+        Console.WriteLine("devices that die by themselves");
+        string err;
+
+        // capture: unplugged mid-run -> the microphone no longer counts as open, and it can be started again
+        FakeCapture first = new FakeCapture(), second = new FakeCapture();
+        int made = 0;
+        VoiceChannel ch = new VoiceChannel(delegate { return made++ == 0 ? first : second; }, delegate { return new FakePlayback(); }, false);
+        Check(ch.StartMic(out err) && ch.MicOpen, "microphone is open");
+        for (int i = 0; i < 3; i++) first.Feed(new short[N]);
+        for (int i = 0; i < 3; i++) first.Feed(Tone(300, 8000, (long)i * N, N));
+        Check(ch.Transmitting, "transmitting before the device dies");
+        first.Fail();
+        Check(!ch.MicOpen, "a dead capture device: MicOpen is false");
+        Check(!ch.Transmitting, "a dead capture device: not transmitting (the button must not stay lit)");
+        Check(ch.StartMic(out err) && ch.MicOpen, "StartMic replaces the dead capture device (" + err + ")");
+        Check(made == 2 && second.Starts == 1, "a new capture device was created and started");
+        Check(first.Stops >= 1 && first.Disposes == 1, "the dead capture device was released");
+        ch.TakeOutgoing();
+        first.Feed(Tone(300, 8000, 0, N));
+        Check(ch.TakeOutgoing().Length == 0, "frames of the replaced device are ignored");
+        for (int i = 0; i < 3; i++) second.Feed(new short[N]);
+        for (int i = 0; i < 3; i++) second.Feed(Tone(300, 8000, (long)i * N, N));
+        Check(ch.Transmitting && ch.TakeOutgoing().Length > 0, "the new device works");
+        second.Fail();
+        ch.StopMic();
+        Check(second.Disposes == 1 && !ch.MicOpen, "StopMic also releases a dead device");
+        ch.Dispose();
+
+        // playback: the device dies -> the next received frame opens a new one
+        List<FakePlayback> devices = new List<FakePlayback>();
+        VoiceChannel pc = new VoiceChannel(delegate { return new FakeCapture(); },
+            delegate { FakePlayback p = new FakePlayback(); devices.Add(p); return p; }, false);
+        string payload = Payload(Tone(440, 5000, 0, N));
+        pc.Receive("A", payload);
+        pc.Receive("A", payload);
+        pc.Receive("A", payload);
+        Steps(pc, 4);
+        Check(devices.Count == 1 && devices[0].Count > 0, "audio reaches the first playback device");
+        pc.AdvanceClockForTest(2000); // it lived long enough to count as a working device
+        devices[0].Fail();
+        int before = devices[0].Count;
+        pc.MixStep();
+        Check(devices[0].Count == before, "nothing is fed to a dead playback device");
+        pc.Receive("A", payload);
+        Check(devices.Count == 2 && devices[1].Starts == 1, "the next frame opens a new playback device (" + devices.Count + ")");
+        Check(devices[0].Stops >= 1 && devices[0].Disposes == 1, "the dead playback device was released");
+        pc.Receive("A", payload);
+        pc.Receive("A", payload);
+        Steps(pc, 4);
+        Check(devices.Count == 2 && devices[1].Count > 0, "audio reaches the new playback device");
+        pc.Dispose();
+        Check(devices[1].Disposes == 1, "Dispose releases the new device");
+
+        // a device that dies right after it was opened is not reopened on every frame
+        List<FakePlayback> flaky = new List<FakePlayback>();
+        VoiceChannel fc = new VoiceChannel(delegate { return new FakeCapture(); },
+            delegate { FakePlayback p = new FakePlayback(); flaky.Add(p); return p; }, false);
+        fc.Receive("A", payload);
+        flaky[0].Fail();
+        for (int i = 0; i < 4; i++) fc.Receive("A", payload);
+        Check(flaky.Count == 1, "a device that died at once waits for the retry back-off (" + flaky.Count + ")");
+        fc.AdvanceClockForTest(5100);
+        fc.Receive("A", payload);
+        Check(flaky.Count == 2, "after the back-off a new device is opened (" + flaky.Count + ")");
+        fc.Dispose();
+    }
+
+    static void MixerSurvivesTests()
+    {
+        Console.WriteLine("mixer thread");
+        string payload = Payload(Tone(440, 5000, 0, N));
+
+        // an exception inside a mix step (here: the device throws) costs one tick, not the mixer
+        FakePlayback pb = new FakePlayback();
+        pb.ThrowOnEnqueue = 1;
+        VoiceChannel ch = new VoiceChannel(delegate { return new FakeCapture(); }, delegate { return pb; });
+        for (int i = 0; i < 4; i++) ch.Receive("A", payload);
+        bool played = WaitUntil(delegate { return pb.Count >= 3; }, 3000);
+        Check(pb.ThrowOnEnqueue == 0, "the failing step really happened");
+        Check(played, "audio keeps flowing after a mix step threw (" + pb.Count + " chunks)");
+        Check(ch.MixerAlive, "the mixer thread is still running");
+        ch.Dispose();
+        Check(!ch.MixerAlive, "and it ends with the channel");
+
+        // mute stops the mixer without blocking, unmute brings one back
+        FakePlayback pb2 = new FakePlayback();
+        VoiceChannel m = new VoiceChannel(delegate { return new FakeCapture(); }, delegate { return pb2; });
+        m.Receive("A", payload);
+        Check(m.MixerAlive, "mixer runs while there is a playback device");
+        Stopwatch sw = Stopwatch.StartNew();
+        m.SpeakerMuted = true;
+        Check(sw.ElapsedMilliseconds < 500, "muting does not wait for the mixer (" + sw.ElapsedMilliseconds + " ms)");
+        Check(!m.MixerAlive, "no mixer while muted");
+        m.SpeakerMuted = false;
+        m.Receive("A", payload);
+        m.Receive("A", payload);
+        Check(m.MixerAlive, "a mixer is back after unmuting");
+        Check(WaitUntil(delegate { return pb2.Count > 0; }, 3000), "and it feeds the playback");
+        m.Dispose();
+    }
+
+    static void ReleaseTests()
+    {
+        Console.WriteLine("device release");
+
+        // every release step may throw: none of them may escape (it runs on a worker thread) or skip the others
+        int resets = 0, unprepares = 0, closes = 0;
+        WaveApi api = new WaveApi(
+            delegate(IntPtr h) { resets++; throw new InvalidOperationException("reset"); },
+            delegate(IntPtr h, IntPtr hdr, int size) { unprepares++; throw new InvalidOperationException("unprepare"); },
+            delegate(IntPtr h) { closes++; throw new InvalidOperationException("close"); });
+        WaveBufferSet bufs = new WaveBufferSet(3, 64);
+        for (int i = 0; i < 3; i++) bufs.Prepared[i] = true;
+        AutoResetEvent evt = new AutoResetEvent(false);
+        bool threw = false;
+        try { WaveRelease.Run(api, new IntPtr(12345), bufs, evt); }
+        catch (Exception) { threw = true; }
+        Check(!threw, "an exception in a release step does not escape");
+        Check(resets == 1 && unprepares == 3 && closes == 1, "every step was still tried (" + resets + "/" + unprepares + "/" + closes + ")");
+        Check(bufs.Headers[0] == IntPtr.Zero && bufs.Data[2] == IntPtr.Zero, "the unmanaged buffers were freed anyway");
+        bool disposed = false;
+        try { evt.Set(); } catch (ObjectDisposedException) { disposed = true; }
+        Check(disposed, "the wake-up event was disposed anyway");
+
+        threw = false;
+        try { WaveRelease.Run(api, IntPtr.Zero, null, null); WaveRelease.Signal(evt); WaveRelease.Signal(null); }
+        catch (Exception) { threw = true; }
+        Check(!threw, "releasing nothing and waking a disposed event are harmless");
+
+        // the close gate: a new device waits for the old one that is still closing, but never forever
+        DeviceCloseGate gate = new DeviceCloseGate();
+        Check(gate.WaitIdle(10), "an idle gate does not wait");
+        gate.Begin();
+        Stopwatch sw = Stopwatch.StartNew();
+        Check(!gate.WaitIdle(60) && sw.ElapsedMilliseconds >= 50, "a gate with a stalled close times out");
+        Thread ender = new Thread(delegate() { Thread.Sleep(80); gate.End(); });
+        ender.IsBackground = true;
+        ender.Start();
+        sw.Restart();
+        Check(gate.WaitIdle(3000) && sw.ElapsedMilliseconds < 2000, "the wait ends as soon as the old device is closed");
+        gate.End();
+        Check(gate.Closing == 0, "an extra End never makes the count negative");
+    }
+
+    static void SlowDriverTests()
+    {
+        Console.WriteLine("slow drivers do not block the channel");
+
+        FakeCapture slow = new FakeCapture();
+        slow.StartEntered = new ManualResetEvent(false);
+        slow.StartRelease = new ManualResetEvent(false);
+        VoiceChannel ch = new VoiceChannel(delegate { return slow; }, delegate { return new FakePlayback(); }, false);
+        bool result = false;
+        string startError = "unset";
+        Thread opener = new Thread(delegate() { string e; result = ch.StartMic(out e); startError = e; });
+        opener.IsBackground = true;
+        opener.Start();
+        Check(slow.StartEntered.WaitOne(3000), "the capture device is being opened");
+        bool answered = ReturnsWithin(delegate
+        {
+            bool a = ch.Transmitting;
+            bool b = ch.MicOpen;
+            bool c = ch.IsSpeaking("x");
+            ch.TakeOutgoing();
+            ch.Receive("x", Payload(Tone(440, 5000, 0, N)));
+            ch.SetSenderMuted("y", true);
+        }, 2000);
+        Check(answered, "while the capture device opens, the channel still answers other threads");
+        Check(!ch.MicOpen, "the microphone is not open before the device finished starting");
+        slow.StartRelease.Set();
+        Check(opener.Join(3000), "StartMic returns once the device started");
+        Check(result && startError == null && ch.MicOpen, "and the microphone is open then");
+        ch.Dispose();
+
+        // Dispose while the device is still opening: the late device is released, StartMic reports a closed channel
+        FakeCapture late = new FakeCapture();
+        late.StartEntered = new ManualResetEvent(false);
+        late.StartRelease = new ManualResetEvent(false);
+        VoiceChannel ch2 = new VoiceChannel(delegate { return late; }, delegate { return new FakePlayback(); }, false);
+        bool result2 = true;
+        Thread opener2 = new Thread(delegate() { string e; result2 = ch2.StartMic(out e); });
+        opener2.IsBackground = true;
+        opener2.Start();
+        Check(late.StartEntered.WaitOne(3000), "second capture device is being opened");
+        Check(ReturnsWithin(delegate { ch2.Dispose(); }, 2000), "Dispose does not wait for a device that is still opening");
+        late.StartRelease.Set();
+        Check(opener2.Join(3000) && !result2, "StartMic fails after the channel was disposed meanwhile");
+        Check(late.Disposes == 1 && !ch2.MicOpen, "the device that finished late was released");
+
+        // the same for playback: Receive opens the device outside the lock
+        FakePlayback slowPb = new FakePlayback();
+        slowPb.StartEntered = new ManualResetEvent(false);
+        slowPb.StartRelease = new ManualResetEvent(false);
+        VoiceChannel ch3 = new VoiceChannel(delegate { return new FakeCapture(); }, delegate { return slowPb; }, false);
+        string payload = Payload(Tone(440, 5000, 0, N));
+        Thread receiver = new Thread(delegate() { ch3.Receive("A", payload); });
+        receiver.IsBackground = true;
+        receiver.Start();
+        Check(slowPb.StartEntered.WaitOne(3000), "the playback device is being opened");
+        bool answered3 = ReturnsWithin(delegate
+        {
+            bool a = ch3.IsSpeaking("A");
+            ch3.TakeOutgoing();
+            ch3.MixStep();
+            ch3.Receive("B", payload);
+        }, 2000);
+        Check(answered3, "while the playback device opens, the channel still answers other threads");
+        slowPb.StartRelease.Set();
+        Check(receiver.Join(3000), "Receive returns once the device started");
+        ch3.Receive("A", payload);
+        Steps(ch3, 3);
+        Check(slowPb.Count > 0, "audio is played after the slow open");
+        ch3.Dispose();
+        Check(slowPb.Disposes == 1, "and the device is released once");
+    }
+
     // ---- real playback, silence only ----
 
     static void RealPlaybackSmoke()
     {
         Console.WriteLine("real playback (silence)");
-        if (!VoiceChannel.SpeakerAvailable)
+        if (WinMm.waveOutGetNumDevs() <= 0)
         {
             Console.WriteLine("  SKIPPED: no audio output device");
             return;
@@ -1045,6 +1309,10 @@ static class VoiceTests
         ContinuityTests();
         MuteAndDisposeTests();
         ConcurrencyTests();
+        DeadDeviceTests();
+        MixerSurvivesTests();
+        ReleaseTests();
+        SlowDriverTests();
         RealPlaybackSmoke();
 
         if (failures == 0) { Console.WriteLine("ALL VOICE TESTS PASSED"); return 0; }

@@ -1,8 +1,26 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 
 namespace ChessGame
 {
+    /// <summary>The context a transport raises its events on: the one of the thread that creates it.</summary>
+    internal static class UiContext
+    {
+        /// <summary>
+        /// The current SynchronizationContext. A missing one, or a plain SynchronizationContext (which posts to the thread pool),
+        /// would silently run the events on pool threads, against the contract of IRoomTransport: refuse instead.
+        /// </summary>
+        public static SynchronizationContext Capture(string owner)
+        {
+            SynchronizationContext ctx = SynchronizationContext.Current;
+            if (ctx == null || ctx.GetType() == typeof(SynchronizationContext))
+                throw new InvalidOperationException(owner + " must be created on a thread with a message loop (a UI SynchronizationContext): " +
+                                                    "its events are raised there.");
+            return ctx;
+        }
+    }
+
     /// <summary>
     /// How the members of a room are connected. The room is a star: one hub (the host) and any number of clients.
     /// A client talks to everybody through the hub; the hub relays. Lines are plain text without line breaks (at most 2048 chars).

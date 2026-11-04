@@ -30,7 +30,7 @@ namespace ChessGame
         readonly int[][] scoreBuf = new int[MaxPly + 2][];
         readonly Move[,] killers = new Move[MaxPly + 2, 2];
         readonly int[,] history = new int[64, 64];
-        readonly Random rng = new Random();
+        readonly Random rng = new Random(Guid.NewGuid().GetHashCode());   // not the clock: two engines made in the same tick must not share a seed
 
         Position pos;
         ulong[] stack;

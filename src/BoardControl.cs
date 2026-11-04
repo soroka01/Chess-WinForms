@@ -122,6 +122,7 @@ namespace ChessGame
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint
                 | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
             TabStop = false;
+            ThemeWatch.AttachWithBoardScheme(this, delegate { Invalidate(); });
             animTimer.Interval = 15;
             animTimer.Tick += delegate { OnAnimationTick(); };
         }
@@ -327,27 +328,6 @@ namespace ChessGame
             return r * 8 + f;
         }
 
-        // ------------------------------------------------------------ theme
-
-        protected override void OnHandleCreated(EventArgs e)
-        {
-            base.OnHandleCreated(e);
-            Theme.Changed += OnStyleChanged;
-            BoardSchemes.Changed += OnStyleChanged;
-        }
-
-        protected override void OnHandleDestroyed(EventArgs e)
-        {
-            Theme.Changed -= OnStyleChanged;
-            BoardSchemes.Changed -= OnStyleChanged;
-            base.OnHandleDestroyed(e);
-        }
-
-        void OnStyleChanged()
-        {
-            if (!IsDisposed) Invalidate();
-        }
-
         // ------------------------------------------------------------ painting
 
         protected override void OnPaint(PaintEventArgs e)
@@ -366,7 +346,43 @@ namespace ChessGame
             RectangleF boardRect = new RectangleF(originX, originY, cell * 8, cell * 8);
             float corner = Ui.S(8f);
 
-            // soft shadow under the board
+            DrawShadow(g, theme, boardRect, corner);
+            DrawSquares(g, scheme);
+
+            // last move
+            int lastFrom = -1, lastTo = -1;
+            if (viewPos != null) { lastFrom = viewFrom; lastTo = viewTo; }
+            else if (game.HasLastMove) { ChessMove lm = game.LastMove; lastFrom = lm.From; lastTo = lm.To; }
+            if (lastFrom >= 0) FillSquares(g, Color.FromArgb(120, 205, 210, 60), lastFrom, lastTo);
+
+            // selection
+            if (selected >= 0) FillSquares(g, Color.FromArgb(140, 90, 190, 60), selected, -1);
+
+            // queued move
+            if (premoveFrom >= 0 && viewPos == null) FillSquares(g, Color.FromArgb(125, 220, 70, 50), premoveFrom, premoveTo);
+
+            DrawCheckGlow(g, pos);
+            DrawCoords(g, scheme);
+            DrawFrame(g, theme, boardRect, corner);
+            DrawPieces(g, pos);
+            DrawTargets(g, pos);
+
+            if (hintFrom >= 0 && viewPos == null) DrawArrow(g, hintFrom, hintTo);
+
+            // piece being dragged
+            if (dragging && dragMoved && dragFrom >= 0 && viewPos == null)
+            {
+                int p = pos.Sq[dragFrom];
+                if (p != 0)
+                    g.DrawImageUnscaled(PieceCache.Get(p, cell), dragPos.X - cell / 2, dragPos.Y - cell / 2);
+            }
+
+            if (OverlayVisible) DrawResultCard(g, boardRect, corner);
+        }
+
+        /// <summary>Soft shadow under the board.</summary>
+        void DrawShadow(Graphics g, Theme theme, RectangleF boardRect, float corner)
+        {
             for (int i = 6; i >= 1; i--)
             {
                 RectangleF s = boardRect;
@@ -374,17 +390,10 @@ namespace ChessGame
                 s.Offset(0, Ui.S(2f));
                 Ui.FillRound(g, Color.FromArgb(theme.IsDark ? 16 : 10, 0, 0, 0), s, corner + i * Ui.S(1.6f));
             }
+        }
 
-            int checkSq = -1;
-            if (pos.InCheck(pos.WhiteToMove)) checkSq = pos.WhiteToMove ? pos.WhiteKing : pos.BlackKing;
-
-            if (coordFont == null || coordFontCell != cell)
-            {
-                if (coordFont != null) coordFont.Dispose();
-                coordFont = new Font("Segoe UI", Math.Max(7f, cell / 6.5f), FontStyle.Bold, GraphicsUnit.Pixel);
-                coordFontCell = cell;
-            }
-
+        void DrawSquares(Graphics g, BoardScheme scheme)
+        {
             using (SolidBrush lightBrush = new SolidBrush(scheme.Light))
             using (SolidBrush darkBrush = new SolidBrush(scheme.Dark))
             {
@@ -395,60 +404,51 @@ namespace ChessGame
                     g.FillRectangle(light ? lightBrush : darkBrush, o.X, o.Y, cell, cell);
                 }
             }
+        }
 
-            // last move
-            int lastFrom = -1, lastTo = -1;
-            if (viewPos != null) { lastFrom = viewFrom; lastTo = viewTo; }
-            else if (game.HasLastMove) { ChessMove lm = game.LastMove; lastFrom = lm.From; lastTo = lm.To; }
-            if (lastFrom >= 0)
+        /// <summary>Tints square a and, when it is not negative, square b.</summary>
+        void FillSquares(Graphics g, Color color, int a, int b)
+        {
+            using (Brush brush = new SolidBrush(color))
             {
-                using (Brush b = new SolidBrush(Color.FromArgb(120, 205, 210, 60)))
+                Point oa = SquareOrigin(a);
+                g.FillRectangle(brush, oa.X, oa.Y, cell, cell);
+                if (b < 0) return;
+                Point ob = SquareOrigin(b);
+                g.FillRectangle(brush, ob.X, ob.Y, cell, cell);
+            }
+        }
+
+        /// <summary>A red glow on the king of the side to move when it is in check.</summary>
+        void DrawCheckGlow(Graphics g, Position pos)
+        {
+            if (!pos.InCheck(pos.WhiteToMove)) return;
+            int checkSq = pos.WhiteToMove ? pos.WhiteKing : pos.BlackKing;
+            Point o = SquareOrigin(checkSq);
+            using (GraphicsPath gp = new GraphicsPath())
+            {
+                gp.AddEllipse(o.X - cell * 0.1f, o.Y - cell * 0.1f, cell * 1.2f, cell * 1.2f);
+                using (PathGradientBrush pg = new PathGradientBrush(gp))
                 {
-                    Point a = SquareOrigin(lastFrom), c = SquareOrigin(lastTo);
-                    g.FillRectangle(b, a.X, a.Y, cell, cell);
-                    g.FillRectangle(b, c.X, c.Y, cell, cell);
+                    pg.CenterColor = Color.FromArgb(235, 235, 40, 30);
+                    pg.SurroundColors = new Color[] { Color.FromArgb(0, 235, 40, 30) };
+                    GraphicsState state = g.Save();
+                    g.SetClip(new Rectangle(o.X, o.Y, cell, cell));
+                    g.FillPath(pg, gp);
+                    g.Restore(state);
                 }
             }
+        }
 
-            // selection
-            if (selected >= 0)
+        /// <summary>File letters along the bottom edge and rank numbers along the left one.</summary>
+        void DrawCoords(Graphics g, BoardScheme scheme)
+        {
+            if (coordFont == null || coordFontCell != cell)
             {
-                Point o = SquareOrigin(selected);
-                using (Brush b = new SolidBrush(Color.FromArgb(140, 90, 190, 60)))
-                    g.FillRectangle(b, o.X, o.Y, cell, cell);
+                if (coordFont != null) coordFont.Dispose();
+                coordFont = new Font("Segoe UI", Math.Max(7f, cell / 6.5f), FontStyle.Bold, GraphicsUnit.Pixel);
+                coordFontCell = cell;
             }
-
-            // queued move
-            if (premoveFrom >= 0 && viewPos == null)
-            {
-                using (Brush b = new SolidBrush(Color.FromArgb(125, 220, 70, 50)))
-                {
-                    Point a = SquareOrigin(premoveFrom), c = SquareOrigin(premoveTo);
-                    g.FillRectangle(b, a.X, a.Y, cell, cell);
-                    g.FillRectangle(b, c.X, c.Y, cell, cell);
-                }
-            }
-
-            // king in check
-            if (checkSq >= 0)
-            {
-                Point o = SquareOrigin(checkSq);
-                using (GraphicsPath gp = new GraphicsPath())
-                {
-                    gp.AddEllipse(o.X - cell * 0.1f, o.Y - cell * 0.1f, cell * 1.2f, cell * 1.2f);
-                    using (PathGradientBrush pg = new PathGradientBrush(gp))
-                    {
-                        pg.CenterColor = Color.FromArgb(235, 235, 40, 30);
-                        pg.SurroundColors = new Color[] { Color.FromArgb(0, 235, 40, 30) };
-                        Region old = g.Clip;
-                        g.SetClip(new Rectangle(o.X, o.Y, cell, cell));
-                        g.FillPath(pg, gp);
-                        g.Clip = old;
-                    }
-                }
-            }
-
-            // coordinates
             using (SolidBrush lightText = new SolidBrush(scheme.Light))
             using (SolidBrush darkText = new SolidBrush(scheme.Dark))
             {
@@ -470,19 +470,26 @@ namespace ChessGame
                     g.DrawString((rankOnLeft + 1).ToString(), coordFont, lightL ? darkText : lightText, ol.X + 2, ol.Y + 1);
                 }
             }
+        }
 
-            // round the four outer corners of the board
+        /// <summary>Rounds the four outer corners of the board and draws its border.</summary>
+        void DrawFrame(Graphics g, Theme theme, RectangleF boardRect, float corner)
+        {
             using (GraphicsPath ring = new GraphicsPath(FillMode.Alternate))
             {
                 RectangleF outer = boardRect;
                 outer.Inflate(2, 2);
                 ring.AddRectangle(outer);
-                ring.AddPath(Ui.RoundPath(boardRect, corner), false);
+                using (GraphicsPath inner = Ui.RoundPath(boardRect, corner))
+                    ring.AddPath(inner, false);
                 using (SolidBrush b = new SolidBrush(theme.Window)) g.FillPath(b, ring);
             }
             Ui.DrawRound(g, Ui.Alpha(theme.Border, 200), boardRect, corner, 1f);
+        }
 
-            // pieces
+        /// <summary>The pieces at rest, the sliding ones (ease-out) with the captured piece waiting on its square, and the queued piece.</summary>
+        void DrawPieces(Graphics g, Position pos)
+        {
             for (int sq = 0; sq < 64; sq++)
             {
                 int p = pos.Sq[sq];
@@ -493,7 +500,6 @@ namespace ChessGame
                 g.DrawImageUnscaled(PieceCache.Get(p, cell), o.X, o.Y);
             }
 
-            // sliding pieces (ease-out), plus the captured piece waiting on its square
             if (slides.Count > 0 && viewPos == null)
             {
                 if (animCapturedSq >= 0)
@@ -522,59 +528,41 @@ namespace ChessGame
                     DrawFaded(g, PieceCache.Get(ghost, cell), o.X, o.Y, 0.6f);
                 }
             }
+        }
 
-            // where the selected piece may be queued
+        /// <summary>Where the selected piece may be queued (orange) and where it may move now (green).</summary>
+        void DrawTargets(Graphics g, Position pos)
+        {
             if (selected >= 0 && viewPos == null)
             {
                 foreach (int t in premoveTargets)
-                {
-                    Point o = SquareOrigin(t);
-                    if (pos.Sq[t] != 0)
-                    {
-                        float w = Math.Max(3f, cell / 11f);
-                        using (Pen pen = new Pen(Color.FromArgb(150, 215, 90, 40), w))
-                            g.DrawEllipse(pen, o.X + w / 2f, o.Y + w / 2f, cell - w, cell - w);
-                    }
-                    else
-                    {
-                        float d = cell * 0.30f;
-                        using (Brush b = new SolidBrush(Color.FromArgb(140, 215, 90, 40)))
-                            g.FillEllipse(b, o.X + (cell - d) / 2f, o.Y + (cell - d) / 2f, d, d);
-                    }
-                }
+                    DrawTargetMarker(g, t, pos.Sq[t] != 0, Color.FromArgb(215, 90, 40), 150);
             }
 
-            // legal move markers
             foreach (ChessMove m in selectedMoves)
             {
                 if (m.Promo != 0 && m.Promo != Pc.Queen) continue;   // draw each target once
-                Point o = SquareOrigin(m.To);
                 bool capture = pos.Sq[m.To] != 0 || (m.Flags & ChessMove.EnPassant) != 0;
-                if (capture)
-                {
-                    float w = Math.Max(3f, cell / 11f);
-                    using (Pen pen = new Pen(Color.FromArgb(120, 20, 85, 30), w))
-                        g.DrawEllipse(pen, o.X + w / 2f, o.Y + w / 2f, cell - w, cell - w);
-                }
-                else
-                {
-                    float d = cell * 0.30f;
-                    using (Brush b = new SolidBrush(Color.FromArgb(110, 20, 85, 30)))
-                        g.FillEllipse(b, o.X + (cell - d) / 2f, o.Y + (cell - d) / 2f, d, d);
-                }
+                DrawTargetMarker(g, m.To, capture, Color.FromArgb(20, 85, 30), 120);
             }
+        }
 
-            if (hintFrom >= 0 && viewPos == null) DrawArrow(g, hintFrom, hintTo);
-
-            // piece being dragged
-            if (dragging && dragMoved && dragFrom >= 0 && viewPos == null)
+        /// <summary>A ring around a square that holds a piece to take, otherwise a dot in the middle; the dot is a little fainter.</summary>
+        void DrawTargetMarker(Graphics g, int sq, bool capture, Color tone, int alpha)
+        {
+            Point o = SquareOrigin(sq);
+            if (capture)
             {
-                int p = pos.Sq[dragFrom];
-                if (p != 0)
-                    g.DrawImageUnscaled(PieceCache.Get(p, cell), dragPos.X - cell / 2, dragPos.Y - cell / 2);
+                float w = Math.Max(3f, cell / 11f);
+                using (Pen pen = new Pen(Ui.Alpha(tone, alpha), w))
+                    g.DrawEllipse(pen, o.X + w / 2f, o.Y + w / 2f, cell - w, cell - w);
             }
-
-            if (OverlayVisible) DrawResultCard(g, boardRect, corner);
+            else
+            {
+                float d = cell * 0.30f;
+                using (Brush b = new SolidBrush(Ui.Alpha(tone, alpha - 10)))
+                    g.FillEllipse(b, o.X + (cell - d) / 2f, o.Y + (cell - d) / 2f, d, d);
+            }
         }
 
         static void DrawFaded(Graphics g, Bitmap bmp, int x, int y, float alpha)
@@ -669,6 +657,11 @@ namespace ChessGame
         {
             if (disposing)
             {
+                if (game != null)
+                {
+                    game.MovePlayed -= OnMovePlayed;
+                    game.PositionReset -= OnPositionReset;
+                }
                 if (coordFont != null) coordFont.Dispose();
                 animTimer.Dispose();
             }
@@ -690,6 +683,17 @@ namespace ChessGame
             if (p == 0) return false;
             bool white = CanPremove() ? humanMask == 1 : game.Pos.WhiteToMove;   // while waiting, "ours" is the human side
             return (p > 0) == white;
+        }
+
+        /// <summary>Picks up the piece on sq. Call it before the selection changes: it remembers whether sq was already selected.</summary>
+        void BeginDrag(int sq, Point at)
+        {
+            wasSelectedOnDown = selected == sq;
+            dragging = true;
+            dragMoved = false;
+            dragFrom = sq;
+            dragStart = at;
+            dragPos = at;
         }
 
         void SelectSquare(int sq)
@@ -723,13 +727,8 @@ namespace ChessGame
 
             if (IsOwnPiece(sq))
             {
-                wasSelectedOnDown = selected == sq;
+                BeginDrag(sq, e.Location);
                 SelectSquare(sq);
-                dragging = true;
-                dragMoved = false;
-                dragFrom = sq;
-                dragStart = e.Location;
-                dragPos = e.Location;
             }
             else
             {
@@ -751,7 +750,8 @@ namespace ChessGame
             if (dragging)
             {
                 dragPos = e.Location;
-                if (!dragMoved && (Math.Abs(e.X - dragStart.X) > 4 || Math.Abs(e.Y - dragStart.Y) > 4))
+                Size threshold = SystemInformation.DragSize;
+                if (!dragMoved && (Math.Abs(e.X - dragStart.X) > threshold.Width || Math.Abs(e.Y - dragStart.Y) > threshold.Height))
                     dragMoved = true;
                 if (dragMoved) Invalidate();
                 return;
@@ -815,15 +815,10 @@ namespace ChessGame
             }
             if (IsOwnPiece(sq))
             {
-                wasSelectedOnDown = selected == sq;
+                BeginDrag(sq, e.Location);
                 selected = sq;
                 selectedMoves.Clear();
                 premoveTargets = Premoves.Targets(game.Pos, sq);
-                dragging = true;
-                dragMoved = false;
-                dragFrom = sq;
-                dragStart = e.Location;
-                dragPos = e.Location;
             }
             else
             {
@@ -852,8 +847,19 @@ namespace ChessGame
                     choice = dlg.Choice;
                 }
                 if (choice == 0) { Invalidate(); return true; }   // cancelled
-                foreach (ChessMove m in matches)
-                    if (m.Promo == choice) chosen = m;
+
+                // the dialog pumped messages: the opponent may have moved or the game may have ended meanwhile, so look again
+                bool stillLegal = false;
+                if (!IsDisposed && CanInteract())
+                {
+                    foreach (ChessMove m in game.Legal)
+                        if (m.From == from && m.To == to && m.Promo == choice) { chosen = m; stillLegal = true; break; }
+                }
+                if (!stillLegal)
+                {
+                    if (!IsDisposed) { ResetSelection(); Invalidate(); }
+                    return true;
+                }
             }
 
             ResetSelection();

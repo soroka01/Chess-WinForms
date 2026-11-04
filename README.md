@@ -118,10 +118,10 @@ The tests are console programs built from the same sources (the `tests/` folder)
 | Script | What it checks |
 | --- | --- |
 | `tests\run-tests.bat` | the engine: perft check of the move generator, engine-versus-engine games |
-| `tests\run-room-tests.bat` | the room (`RoomSession`) on an in-memory transport: joining, seats, permissions, host hand-over |
+| `tests\run-room-tests.bat` | the room (`RoomSession`) and its game (`RoomGame`) on an in-memory transport: joining, seats, permissions, host hand-over, moves, draws, rematch, late joiners |
 | `tests\run-lan-room-tests.bat` | the LAN TCP transport: hub, reconnects, limits, hub hand-over |
 | `tests\run-voice-tests.bat` | codec, voice detection, jitter buffer, mixer |
-| `tests\run-net-tests.bat [group]` | whole game windows: games, spectators, permissions, host hand-over, chat and voice (LAN and a fake Steam) |
+| `tests\run-net-tests.bat [group]` | whole game windows: games, spectators, permissions, host hand-over, chat and voice (LAN and a fake Steam), plus the settings file and the update check (groups: discovery steam settings update games review premove approval chat room) |
 
 Test windows open off-screen; a test that hangs stops by itself and prints where it is stuck.
 
@@ -132,16 +132,17 @@ Chess-WinForms/
 ├── src/
 │   ├── Position.cs, Game.cs, Engine.cs   # rules, game, move search
 │   ├── RoomSession.cs                    # the room: members, seats, permissions, host
+│   ├── RoomGame.cs                       # the game of a room: the host validates, everybody else applies
 │   ├── RoomTransport.cs                  # transport interfaces
 │   ├── LanRoomTransport.cs               # TCP hub, discovery, hub relocation
 │   ├── SteamRoomTransport.cs             # a room on top of a Steam lobby
 │   ├── SteamLobbyService.cs, SteamLink.cs # Steam API without the SDK: DLL loading and lobbies
 │   ├── SteamDllStamp.cs                  # fingerprint of the Steam DLL: notice that Steam changed it
 │   ├── AppInfo.cs, UpdateChecker.cs      # the game version and the check for a newer one on GitHub
-│   ├── Voice.cs                          # microphone, codec, mixer, speaker
+│   ├── Voice*.cs, WaveInCapture.cs, WaveOutPlayback.cs, AdpcmCodec.cs ...  # microphone, codec, mixer, speaker
 │   ├── MainForm*.cs                      # window, network game, chat, "People" tab
 │   ├── BoardControl.cs, PlayerBar.cs, ChatControl.cs, PeopleList.cs, ...
-│   └── Theme.cs, Themed*.cs              # custom drawing and themes
+│   └── Theme.cs, Themed*.cs, ThinScrollbar.cs, WheelRouter.cs  # custom drawing, themes, scrolling
 ├── tests/                                # tests and stand-ins (lobby, audio, transport)
 ├── docs/screenshots/                     # README images
 ├── build.bat                             # builds Chess.exe
@@ -155,7 +156,7 @@ Chess-WinForms/
 - In the Steam mode everything travels through the shared lobby chat: anybody who has entered it receives the same messages until their copy of the game leaves; removing someone from the room is carried out by that member's own program.
 - When the host role is handed over on a LAN, the new host receives the members' service keys (the room recognises returning people by them). Hand the role over to people you trust.
 - Everybody in the room hears the microphone. Invite people you trust.
-- For the Steam mode the game loads only a `steam_api64.dll` signed by Valve and checks that it exports the functions it needs.
+- For the Steam mode the game loads only a `steam_api64.dll` that carries a certificate issued to Valve and exports the functions it needs. This is a sanity check, not a verified signature and not a trust boundary: the file comes from your own Steam installation (network paths such as `\\server\share` are skipped when searching).
 - The game remembers which `steam_api64.dll` it used (path, size, version, hash). If Steam updated or removed that file, it is checked again like any other; a file that loaded but did not work is skipped until Steam replaces it with a different build.
 - Every few hours the game makes one request to `api.github.com` (the latest release) to learn about a new version. To switch it off, put `updates=0` into `%APPDATA%\ChessGame\settings.ini`.
 

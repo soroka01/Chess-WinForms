@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Text;
 using System.Windows.Forms;
@@ -7,15 +7,8 @@ using ChessMove = ChessGame.Move;
 namespace ChessGame
 {
     // Network play. People meet in a room (see RoomSession): two sit at the board, everybody else watches, the host decides.
-    // The host is the single writer of the game: players send their requests to it, it validates them and tells everybody.
-    //
-    //   player -> host   MOVE <ply> <uci>   RESIGN   DRAW / DRAW_YES / DRAW_NO   NEW / NEW_YES / NEW_NO   RESYNC (anybody)
-    //   host -> everyone PLAYED <ply> <uci>          a move was made (the sender of the move gets it back and ignores it)
-    //                    RESULT <ply> WR|BR|DA       white / black resigned, draw agreed
-    //                    OFFER DRAW|NEW W|B          that side offers a draw / a rematch;  OFFER NONE;  OFFER DECLINED DRAW|NEW
-    //                    NEWGAME                     a new game starts (the seats were swapped just before)
-    //                    SYNC <startPly> <moves...>  the whole game so far (several lines for a long game), then RESULT / OFFER
-    //   anybody          CHAT <text>   VOICE <base64>   (checked against the permissions of the room)
+    // The game itself (what the host validates and announces, what the others apply) is RoomGame; this part is the window around it:
+    // opening and joining a room, what the panels say, the requests of the people waiting, and the buttons.
     public sealed partial class MainForm
     {
         enum NetState { Idle, Connecting, InRoom }
@@ -29,12 +22,9 @@ namespace ChessGame
         string hostAddresses = "";
         string steamName = "";
 
-        // the game as the host announced it
-        string drawOfferBy, newOfferBy;      // "W" / "B" or null
-        string pendingMove;                  // our move "ply uci" that the host has not confirmed yet
+        RoomGame roomGame;                   // the game of the current room (null outside a room)
         bool suppressFx;                     // a whole game is being replayed: no sounds, no slide animation
-        bool wasFull;                        // both seats were held at the last change
-        string seatSig = "";
+        bool animationsBeforeReplay;
         readonly Dictionary<string, string> knownNames = new Dictionary<string, string>();
         readonly Dictionary<string, bool> joinWants = new Dictionary<string, bool>();      // host: id -> wants to play
         readonly Dictionary<string, Seat> seatWants = new Dictionary<string, Seat>();      // host: id -> the seat that spectator asked for
@@ -108,6 +98,7 @@ namespace ChessGame
             segHostSeat.Margin = new Padding(0, 0, 0, Ui.S(12));
 
             lblNet = new Label();
+            lblNet.UseMnemonic = false;   // it shows names of other people: an '&' in one must stay visible
             lblNet.Font = Ui.Font(9.25f);
             lblNet.AutoSize = false;
             lblNet.Height = Ui.S(88);
@@ -207,7 +198,7 @@ namespace ChessGame
             bool playing = inRoom && IAmPlayer && RoomFull && game.Status == GameStatus.Playing;
             netRowGame.Visible = playing;
             btnResign.Enabled = playing;
-            btnDraw.Enabled = playing && drawOfferBy == null;
+            btnDraw.Enabled = playing && roomGame != null && roomGame.CanOfferDraw;
 
             btnSeat.Visible = inRoom;
             if (inRoom)
@@ -475,15 +466,16 @@ namespace ChessGame
             room = s;
             netState = NetState.Connecting;
             netInfo = "";
-            drawOfferBy = newOfferBy = null;
-            pendingMove = null;
             joinWants.Clear();
             seatWants.Clear();
             knownNames.Clear();
-            wasFull = false;
-            seatSig = "";
             game.NewGame();
             board.Flipped = false;
+            roomGame = new RoomGame(s, game);
+            roomGame.Changed += delegate { if (s == room) RefreshAll(); };
+            roomGame.Notice += delegate(GameNotice notice) { if (s == room) OnGameNotice(notice); };
+            roomGame.NewGameStarted += delegate { if (s == room) OnGameStarted(); };
+            roomGame.Replaying += delegate(bool on) { if (s == room) OnGameReplaying(on); };
             WireRoom(s);
             s.Start();
             ApplyMode();
@@ -498,7 +490,7 @@ namespace ChessGame
             s.SeatRequested += delegate(string id, Seat seat) { if (s == room) OnSeatRequested(id, seat); };
             s.MemberJoined += delegate(string id) { if (s == room) OnMemberJoined(id); };
             s.MemberLeft += delegate(string id) { if (s == room) OnMemberLeft(id); };
-            s.NeedsSync += delegate(string id) { if (s == room && room.IsHost) HostSendState(id); };
+            s.NeedsSync += delegate(string id) { if (s == room && room.IsHost) roomGame.SendState(id); };
             s.GameLine += delegate(string from, string line) { if (s == room) OnRoomLine(from, line); };
             s.HostChanged += delegate(string oldId, string newId) { if (s == room) OnHostChanged(oldId, newId); };
             s.HostOffered += delegate(string from, string name) { if (s == room) OnHostOffered(name); };
@@ -537,24 +529,15 @@ namespace ChessGame
             ResetChat();
             roomIsSteam = false;
             netState = NetState.Idle;
-            drawOfferBy = newOfferBy = null;
-            pendingMove = null;
+            roomGame = null;
             joinWants.Clear();
             seatWants.Clear();
             knownNames.Clear();
-            wasFull = false;
-            seatSig = "";
             netInfo = info;
             UpdatePeople();
         }
 
         // ---------------------------------------------------------------- room events
-
-        string SeatSignature()
-        {
-            RoomMember w = room.SeatHolder(Seat.White), b = room.SeatHolder(Seat.Black);
-            return (w == null ? "-" : w.Id) + "|" + (b == null ? "-" : b.Id);
-        }
 
         void RememberNames()
         {
@@ -573,8 +556,7 @@ namespace ChessGame
             netState = NetState.InRoom;
             netInfo = "";
             RememberNames();
-            seatSig = SeatSignature();
-            wasFull = RoomFull;
+            roomGame.Welcomed();
             FaceMySide();
             if (IAmPlayer)
                 chat.AddSystem("Вы в комнате и играете " + (room.MySeat == Seat.White ? "белыми" : "чёрными")
@@ -590,22 +572,8 @@ namespace ChessGame
         {
             if (netState != NetState.InRoom) return;
             RememberNames();
-            bool full = RoomFull;
-            string sig = SeatSignature();
-            bool seatsChanged = sig != seatSig;
-            seatSig = sig;
-
-            if (room.IsHost)
-            {
-                if (seatsChanged && (drawOfferBy != null || newOfferBy != null)) HostClearOffers();
-                if (full && !wasFull && game.Status != GameStatus.Playing) HostStartNewGame();   // somebody sat down after a finished game
-            }
-            wasFull = full;
-            if (seatsChanged)
-            {
-                if (IAmPlayer) FaceMySide();
-                drawOfferBy = drawOfferBy != null && full ? drawOfferBy : null;
-            }
+            bool seatsChanged = roomGame.RoomChanged();
+            if (seatsChanged && IAmPlayer) FaceMySide();
 
             int mask = NetHumanMask();
             if (board.HumanMask != mask) board.HumanMask = mask;
@@ -648,14 +616,7 @@ namespace ChessGame
                 if (newId == room.MyId) chat.AddSystem("Вы теперь хост комнаты");
                 else chat.AddSystem("Новый хост комнаты: «" + NameOf(newId) + "»");
             }
-            // a move that the old host never answered goes to the new one
-            if (pendingMove != null && room != null && !room.IsHost && game.PlyCount > 0)
-            {
-                string[] pm = pendingMove.Split(' ');
-                int ply;
-                if (int.TryParse(pm[0], out ply) && ply == game.PlyCount - 1) room.SendToHost("MOVE " + pendingMove);
-                else pendingMove = null;
-            }
+            roomGame.HostChanged();
             if (roomIsSteam && room != null && room.IsHost) steamName = room.MyName;
         }
 
@@ -691,352 +652,50 @@ namespace ChessGame
         void OnRoomLine(string from, string line)
         {
             if (mode != Mode.Network || netState != NetState.InRoom) return;
-            string[] p = line.Split(' ');
-            switch (p[0])
-            {
-                case "CHAT": OnNetChat(from, line); return;
-                case "VOICE": OnNetVoice(from, line); return;
-            }
-            if (room.IsHost) HostProcess(from, p); else ReplicaApply(p);
+            if (line.StartsWith("CHAT ", StringComparison.Ordinal) || line == "CHAT") { OnNetChat(from, line); return; }
+            if (line.StartsWith("VOICE ", StringComparison.Ordinal) || line == "VOICE") { OnNetVoice(from, line); return; }
+            roomGame.Receive(from, line);
         }
 
-        /// <summary>A player's action: the host handles it itself, everybody else asks the host.</summary>
-        void SubmitPlayerLine(string line)
+        void OnGameNotice(GameNotice notice)
         {
-            if (!InRoom) return;
-            if (room.IsHost) HostProcess(room.MyId, line.Split(' '));
-            else room.SendToHost(line);
-        }
-
-        // ---- host: validates and announces
-
-        void HostProcess(string from, string[] p)
-        {
-            RoomMember m = room.Find(from);
-            if (m == null) return;
-            if (p[0] == "RESYNC") { HostSendState(from); return; }
-            if (m.Seat == Seat.None) return;
-            bool white = m.Seat == Seat.White;
-            string side = white ? "W" : "B";
-            string other = white ? "B" : "W";
-
-            switch (p[0])
+            switch (notice)
             {
-                case "MOVE":
-                    HostMove(from, white, p);
-                    return;
-
-                case "RESIGN":
-                    if (!RoomFull || game.Status != GameStatus.Playing) return;
-                    game.Terminate(white ? GameStatus.WhiteResigned : GameStatus.BlackResigned);
-                    VoidOffers();
-                    room.Broadcast("RESULT " + game.PlyCount + " " + (white ? "WR" : "BR"));
-                    RefreshAll();
-                    return;
-
-                case "DRAW":
-                    if (!RoomFull || game.Status != GameStatus.Playing) return;
-                    if (drawOfferBy == other) { HostAgreeDraw(); return; }   // both asked: that is an agreement
-                    if (drawOfferBy != null) return;
-                    drawOfferBy = side;
-                    room.Broadcast("OFFER DRAW " + side);
-                    RefreshAll();
-                    return;
-
-                case "DRAW_YES":
-                    if (RoomFull && game.Status == GameStatus.Playing && drawOfferBy == other) HostAgreeDraw();
-                    return;
-
-                case "DRAW_NO":
-                    if (drawOfferBy == other)
-                    {
-                        if (IAmPlayer && drawOfferBy == (room.MySeat == Seat.White ? "W" : "B")) netInfo = "Соперник отклонил ничью.";   // our own offer
-                        drawOfferBy = null;
-                        room.Broadcast("OFFER DECLINED DRAW");
-                        RefreshAll();
-                    }
-                    return;
-
-                case "NEW":
-                    if (!RoomFull) return;
-                    if (newOfferBy == other) { HostRematch(); return; }
-                    if (newOfferBy != null) return;
-                    newOfferBy = side;
-                    room.Broadcast("OFFER NEW " + side);
-                    RefreshAll();
-                    return;
-
-                case "NEW_YES":
-                    if (RoomFull && newOfferBy == other) HostRematch();
-                    return;
-
-                case "NEW_NO":
-                    if (newOfferBy == other)
-                    {
-                        if (IAmPlayer && newOfferBy == (room.MySeat == Seat.White ? "W" : "B")) netInfo = "Соперник отказался от новой партии.";
-                        newOfferBy = null;
-                        room.Broadcast("OFFER DECLINED NEW");
-                        RefreshAll();
-                    }
-                    return;
+                case GameNotice.None: netInfo = ""; break;
+                case GameNotice.DrawDeclined: netInfo = "Соперник отклонил ничью."; break;
+                case GameNotice.RematchDeclined: netInfo = "Соперник отказался от новой партии."; break;
             }
         }
 
-        void HostMove(string from, bool white, string[] p)
+        void OnGameStarted()
         {
-            int ply;
-            if (p.Length != 3 || !int.TryParse(p[1], out ply)) { HostSendState(from); return; }
-            if (!RoomFull || game.Status != GameStatus.Playing || ply != game.PlyCount || game.Pos.WhiteToMove != white)
-            {
-                // a late or duplicated request: the sender's board is out of step, show it the real game
-                if (from != room.MyId) HostSendState(from);
-                return;
-            }
-            foreach (ChessMove m in game.Legal)
-            {
-                if (m.ToString() == p[2])
-                {
-                    game.Play(m);
-                    VoidOffers();
-                    netInfo = "";
-                    room.Broadcast("PLAYED " + ply + " " + m);
-                    RefreshAll();
-                    return;
-                }
-            }
-            if (from != room.MyId) HostSendState(from);
-        }
-
-        void HostAgreeDraw()
-        {
-            game.Terminate(GameStatus.DrawAgreed);
-            VoidOffers();
-            room.Broadcast("RESULT " + game.PlyCount + " DA");
-            RefreshAll();
-        }
-
-        void HostRematch()
-        {
-            VoidOffers();
-            room.SwapSeats();       // the colours change first, then the new game starts
-            HostStartNewGame();
-        }
-
-        void HostStartNewGame()
-        {
-            VoidOffers();
-            game.NewGame();
             board.ResetSelection();
-            netInfo = "";
-            room.Broadcast("NEWGAME");
-            if (chat != null) chat.AddSystem("Новая партия");
+            chat.AddSystem("Новая партия");
             FaceMySide();
-            RefreshAll();
         }
 
-        /// <summary>Seats changed: an offer made to somebody who is no longer at the table lapses.</summary>
-        void HostClearOffers()
+        /// <summary>A whole game is replayed from the host's SYNC: no sounds, no sliding pieces while it happens.</summary>
+        void OnGameReplaying(bool on)
         {
-            VoidOffers();
-            room.Broadcast("OFFER NONE");
-        }
-
-        void VoidOffers()
-        {
-            drawOfferBy = newOfferBy = null;
-        }
-
-        /// <summary>Sends the whole game to one member (after it joined, or when it lost the thread).</summary>
-        void HostSendState(string id)
-        {
-            if (!InRoom || id == room.MyId) return;
-            List<string> moves = new List<string>();
-            for (int i = 0; i < game.PlyCount; i++) moves.Add(game.MoveAt(i).ToString());
-            int start = 0;
-            StringBuilder sb = new StringBuilder();
-            do
+            if (on)
             {
-                sb.Length = 0;
-                sb.Append("SYNC ").Append(start);
-                int taken = 0;
-                while (start + taken < moves.Count && sb.Length < 1700)
-                {
-                    sb.Append(' ').Append(moves[start + taken]);
-                    taken++;
-                }
-                room.SendTo(id, sb.ToString());
-                start += taken;
+                animationsBeforeReplay = board.AnimationsEnabled;
+                suppressFx = true;
+                board.AnimationsEnabled = false;
             }
-            while (start < moves.Count);
-
-            switch (game.Status)
-            {
-                case GameStatus.WhiteResigned: room.SendTo(id, "RESULT " + game.PlyCount + " WR"); break;
-                case GameStatus.BlackResigned: room.SendTo(id, "RESULT " + game.PlyCount + " BR"); break;
-                case GameStatus.DrawAgreed: room.SendTo(id, "RESULT " + game.PlyCount + " DA"); break;
-            }
-            if (drawOfferBy != null) room.SendTo(id, "OFFER DRAW " + drawOfferBy);
-            if (newOfferBy != null) room.SendTo(id, "OFFER NEW " + newOfferBy);
-        }
-
-        // ---- everybody else: applies what the host announced
-
-        void AskForResync()
-        {
-            if (InRoom && !room.IsHost) room.SendToHost("RESYNC");
-        }
-
-        void ReplicaApply(string[] p)
-        {
-            switch (p[0])
-            {
-                case "PLAYED":
-                {
-                    int ply;
-                    if (p.Length != 3 || !int.TryParse(p[1], out ply)) return;
-                    if (ply < game.PlyCount)
-                    {
-                        // our own move coming back, or one we already know
-                        if (game.MoveAt(ply).ToString() != p[2]) AskForResync();
-                        else if (pendingMove != null && pendingMove.StartsWith(ply + " ", StringComparison.Ordinal)) pendingMove = null;
-                        return;
-                    }
-                    if (ply > game.PlyCount || game.Status != GameStatus.Playing) { AskForResync(); return; }
-                    foreach (ChessMove m in game.Legal)
-                    {
-                        if (m.ToString() == p[2])
-                        {
-                            game.Play(m);
-                            VoidOffers();
-                            netInfo = "";
-                            RefreshAll();
-                            return;
-                        }
-                    }
-                    AskForResync();
-                    return;
-                }
-
-                case "RESULT":
-                {
-                    int ply;
-                    if (p.Length != 3 || !int.TryParse(p[1], out ply)) return;
-                    if (ply != game.PlyCount) { AskForResync(); return; }
-                    GameStatus status;
-                    switch (p[2])
-                    {
-                        case "WR": status = GameStatus.WhiteResigned; break;
-                        case "BR": status = GameStatus.BlackResigned; break;
-                        case "DA": status = GameStatus.DrawAgreed; break;
-                        default: return;
-                    }
-                    if (game.Status == GameStatus.Playing) game.Terminate(status);
-                    VoidOffers();
-                    pendingMove = null;
-                    RefreshAll();
-                    return;
-                }
-
-                case "OFFER":
-                    ApplyOffer(p);
-                    return;
-
-                case "NEWGAME":
-                    VoidOffers();
-                    pendingMove = null;
-                    game.NewGame();
-                    board.ResetSelection();
-                    netInfo = "";
-                    chat.AddSystem("Новая партия");
-                    FaceMySide();
-                    RefreshAll();
-                    return;
-
-                case "SYNC":
-                    ApplySync(p);
-                    return;
-            }
-        }
-
-        void ApplyOffer(string[] p)
-        {
-            if (p.Length < 2) return;
-            switch (p[1])
-            {
-                case "DRAW": if (p.Length == 3 && (p[2] == "W" || p[2] == "B")) drawOfferBy = p[2]; break;
-                case "NEW": if (p.Length == 3 && (p[2] == "W" || p[2] == "B")) newOfferBy = p[2]; break;
-                case "NONE": VoidOffers(); break;
-                case "DECLINED":
-                    if (p.Length == 3 && p[2] == "DRAW")
-                    {
-                        bool mine = IAmPlayer && drawOfferBy == (room.MySeat == Seat.White ? "W" : "B");
-                        drawOfferBy = null;
-                        if (mine) netInfo = "Соперник отклонил ничью.";
-                    }
-                    else if (p.Length == 3 && p[2] == "NEW")
-                    {
-                        bool mine = IAmPlayer && newOfferBy == (room.MySeat == Seat.White ? "W" : "B");
-                        newOfferBy = null;
-                        if (mine) netInfo = "Соперник отказался от новой партии.";
-                    }
-                    break;
-            }
-            RefreshAll();
-        }
-
-        void ApplySync(string[] p)
-        {
-            int start;
-            if (p.Length < 2 || !int.TryParse(p[1], out start)) return;
-            if (start == 0)
-            {
-                VoidOffers();
-                pendingMove = null;
-            }
-            else if (start != game.PlyCount) return;
-
-            bool animations = board.AnimationsEnabled;
-            suppressFx = true;
-            board.AnimationsEnabled = false;
-            try
-            {
-                if (start == 0) game.NewGame();
-                for (int i = 2; i < p.Length; i++)
-                {
-                    bool found = false;
-                    foreach (ChessMove m in game.Legal)
-                    {
-                        if (m.ToString() == p[i]) { game.Play(m); found = true; break; }
-                    }
-                    if (!found) break;
-                }
-            }
-            finally
+            else
             {
                 suppressFx = false;
-                board.AnimationsEnabled = animations;
+                board.AnimationsEnabled = animationsBeforeReplay;
+                board.ResetSelection();
             }
-            board.ResetSelection();
-            RefreshAll();
         }
 
         // ---------------------------------------------------------------- our own actions
 
         void NetAfterLocalMove(ChessMove m)
         {
-            if (!InRoom) return;
-            int ply = game.PlyCount - 1;
-            netInfo = "";
-            VoidOffers();
-            if (room.IsHost)
-            {
-                room.Broadcast("PLAYED " + ply + " " + m);
-            }
-            else
-            {
-                pendingMove = ply + " " + m;
-                room.SendToHost("MOVE " + pendingMove);
-            }
+            if (InRoom) roomGame.AfterLocalMove(m);
         }
 
         void NetResignClicked()
@@ -1045,25 +704,23 @@ namespace ChessGame
             if (!Ask("Сдаться", "Вы действительно хотите сдаться?")) return;
             if (!InRoom || !RoomFull || game.Status != GameStatus.Playing) return;
             netInfo = "";
-            SubmitPlayerLine("RESIGN");   // the result arrives from the host (a resignation only counts when the host has seen it)
+            roomGame.Resign();
             RefreshAll();
         }
 
         void NetDrawClicked()
         {
-            if (!InRoom || !IAmPlayer || !RoomFull || game.Status != GameStatus.Playing || drawOfferBy != null) return;
+            if (!InRoom || !roomGame.CanOfferDraw) return;
             netInfo = "";
-            SubmitPlayerLine("DRAW");
+            roomGame.OfferDraw();
             RefreshAll();
         }
 
         void NetRequestNewGame()
         {
-            if (!InRoom || !IAmPlayer || !RoomFull) return;
-            string mySide = room.MySeat == Seat.White ? "W" : "B";
-            if (newOfferBy == mySide) return;
+            if (!InRoom || !roomGame.CanRequestRematch) return;
             netInfo = "Новая партия предложена, ждём ответа…";
-            SubmitPlayerLine("NEW");
+            roomGame.RequestRematch();
             RefreshAll();
         }
 
@@ -1152,27 +809,27 @@ namespace ChessGame
                 }
                 if (IAmPlayer && RoomFull)
                 {
-                    string mySide = room.MySeat == Seat.White ? "W" : "B";
-                    if (drawOfferBy != null && drawOfferBy != mySide && game.Status == GameStatus.Playing)
+                    Seat mySide = room.MySeat;
+                    if (roomGame.DrawOfferedBy != Seat.None && roomGame.DrawOfferedBy != mySide && game.Status == GameStatus.Playing)
                     {
                         RequestItem it = new RequestItem();
                         it.Key = "draw";
                         it.Text = "Соперник предлагает ничью.";
                         it.YesText = "Принять";
                         it.NoText = "Отклонить";
-                        it.Yes = delegate { SubmitPlayerLine("DRAW_YES"); RefreshAll(); };
-                        it.No = delegate { SubmitPlayerLine("DRAW_NO"); RefreshAll(); };
+                        it.Yes = delegate { roomGame.AnswerDraw(true); RefreshAll(); };
+                        it.No = delegate { roomGame.AnswerDraw(false); RefreshAll(); };
                         items.Add(it);
                     }
-                    if (newOfferBy != null && newOfferBy != mySide)
+                    if (roomGame.RematchOfferedBy != Seat.None && roomGame.RematchOfferedBy != mySide)
                     {
                         RequestItem it = new RequestItem();
                         it.Key = "new";
                         it.Text = "Соперник предлагает сыграть ещё партию (цвета поменяются).";
                         it.YesText = "Принять";
                         it.NoText = "Отказаться";
-                        it.Yes = delegate { SubmitPlayerLine("NEW_YES"); RefreshAll(); };
-                        it.No = delegate { SubmitPlayerLine("NEW_NO"); RefreshAll(); };
+                        it.Yes = delegate { roomGame.AnswerRematch(true); RefreshAll(); };
+                        it.No = delegate { roomGame.AnswerRematch(false); RefreshAll(); };
                         items.Add(it);
                     }
                 }
@@ -1236,6 +893,6 @@ namespace ChessGame
             }
             return false;
         }
-        internal string DrawOfferForTest { get { return drawOfferBy; } }
+        internal string DrawOfferForTest { get { return roomGame == null || roomGame.DrawOfferedBy == Seat.None ? null : roomGame.DrawOfferedBy.ToString(); } }
     }
 }

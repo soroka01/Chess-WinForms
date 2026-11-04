@@ -10,15 +10,12 @@ namespace ChessGame
     /// The move list: two columns of figurine notation, the current move highlighted, click a move to look at that position.
     /// Scrolls with the mouse wheel and has its own thin scrollbar so that it matches the theme.
     /// </summary>
-    public sealed class MoveListControl : Control
+    public sealed class MoveListControl : Control, IWheelTarget
     {
         IList<string> moves = new List<string>();
         int currentPly;
-        int scroll;                 // pixels
+        readonly ThinScrollbar bar;
         int hoverPly = -1;
-        bool thumbDrag;
-        int thumbGrab;
-        bool thumbHover;
 
         /// <summary>The user picked a move: the number of plies to show (1 = after White's first move).</summary>
         public event Action<int> PlySelected;
@@ -26,8 +23,11 @@ namespace ChessGame
         public MoveListControl()
         {
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer
-                | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
+                | ControlStyles.ResizeRedraw, true);
+            SetStyle(ControlStyles.Selectable, false);   // hovering or clicking must not take the focus from the chat box; the wheel comes through WheelRouter
             TabStop = false;
+            bar = new ThinScrollbar(this, delegate { return ContentH; });
+            ThemeWatch.Attach(this, delegate { Invalidate(); });
         }
 
         Theme T { get { return Theme.Current; } }
@@ -35,7 +35,6 @@ namespace ChessGame
         int NumberW { get { return Ui.S(40); } }
         int Rows { get { return (moves.Count + 1) / 2; } }
         int ContentH { get { return Rows * RowH + Ui.S(6); } }
-        int MaxScroll { get { return Math.Max(0, ContentH - Height); } }
 
         public int CurrentPly
         {
@@ -46,54 +45,31 @@ namespace ChessGame
         /// <summary>Shows the given SAN list (the list object is read live; call again after it changes).</summary>
         public void SetMoves(IList<string> sans, int current)
         {
-            bool atBottom = scroll >= MaxScroll - 2;
+            bool atBottom = bar.Offset >= bar.MaxOffset - 2;
             moves = sans;
             currentPly = current;
-            if (scroll > MaxScroll) scroll = MaxScroll;
-            if (atBottom || current == moves.Count) scroll = MaxScroll;
+            bar.Clamp();
+            if (atBottom || current == moves.Count) bar.ScrollToEnd();
             else EnsureVisible(current);
             Invalidate();
         }
 
         void EnsureVisible(int ply)
         {
-            if (ply <= 0) { scroll = 0; return; }
+            if (ply <= 0) { bar.Offset = 0; return; }
             int row = (ply - 1) / 2;
             int top = row * RowH, bottom = top + RowH + Ui.S(6);
-            if (top < scroll) scroll = top;
-            else if (bottom > scroll + Height) scroll = bottom - Height;
-            scroll = Math.Max(0, Math.Min(scroll, MaxScroll));
+            if (top < bar.Offset) bar.Offset = top;
+            else if (bottom > bar.Offset + Height) bar.Offset = bottom - Height;
+            bar.Offset = Math.Max(0, Math.Min(bar.Offset, bar.MaxOffset));
         }
-
-        protected override void OnHandleCreated(EventArgs e)
-        {
-            base.OnHandleCreated(e);
-            Theme.Changed += OnThemeChanged;
-        }
-
-        protected override void OnHandleDestroyed(EventArgs e)
-        {
-            Theme.Changed -= OnThemeChanged;
-            base.OnHandleDestroyed(e);
-        }
-
-        void OnThemeChanged() { if (!IsDisposed) Invalidate(); }
 
         // ------------------------------------------------------------ geometry
-
-        RectangleF ThumbRect()
-        {
-            if (MaxScroll <= 0) return RectangleF.Empty;
-            float trackH = Height - Ui.S(8);
-            float thumbH = Math.Max(Ui.S(28), trackH * Height / ContentH);
-            float y = Ui.S(4) + (trackH - thumbH) * scroll / MaxScroll;
-            return new RectangleF(Width - Ui.S(8), y, Ui.S(5), thumbH);
-        }
 
         int PlyAt(Point p)
         {
             if (p.X < 0 || p.X >= Width - Ui.S(10)) return -1;
-            int row = (p.Y + scroll) / RowH;
+            int row = (p.Y + bar.Offset) / RowH;
             if (p.Y < 0 || row >= Rows) return -1;
             int cellW = (Width - Ui.S(10) - NumberW) / 2;
             if (p.X < NumberW) return -1;
@@ -104,30 +80,21 @@ namespace ChessGame
 
         // ------------------------------------------------------------ input
 
-        protected override void OnMouseEnter(EventArgs e)
-        {
-            if (!Focused) Focus();   // so that the wheel works without clicking first
-            base.OnMouseEnter(e);
-        }
-
         protected override void OnMouseMove(MouseEventArgs e)
         {
-            if (thumbDrag)
+            if (bar.Dragging)
             {
-                float trackH = Height - Ui.S(8);
-                RectangleF th = ThumbRect();
-                float range = trackH - th.Height;
-                if (range > 0) scroll = (int)Math.Max(0, Math.Min(MaxScroll, (e.Y - thumbGrab - Ui.S(4)) / range * MaxScroll));
+                bar.DragTo(e.Y);
                 Invalidate();
             }
             else
             {
                 int ply = PlyAt(e.Location);
-                bool overThumb = ThumbRect().Contains(e.Location) || (MaxScroll > 0 && e.X >= Width - Ui.S(12));
-                if (ply != hoverPly || overThumb != thumbHover)
+                bool overThumb = bar.IsOverThumb(e.Location);
+                if (ply != hoverPly || overThumb != bar.Hover)
                 {
                     hoverPly = ply;
-                    thumbHover = overThumb;
+                    bar.Hover = overThumb;
                     Cursor = ply > 0 ? Cursors.Hand : Cursors.Default;
                     Invalidate();
                 }
@@ -138,30 +105,20 @@ namespace ChessGame
         protected override void OnMouseLeave(EventArgs e)
         {
             hoverPly = -1;
-            thumbHover = false;
+            bar.Hover = false;
             Invalidate();
             base.OnMouseLeave(e);
         }
 
         protected override void OnMouseDown(MouseEventArgs e)
         {
-            if (e.Button == MouseButtons.Left)
-            {
-                RectangleF th = ThumbRect();
-                if (MaxScroll > 0 && e.X >= Width - Ui.S(12))
-                {
-                    thumbDrag = true;
-                    thumbGrab = th.Contains(e.Location) ? (int)(e.Y - th.Y) : (int)(th.Height / 2);
-                    OnMouseMove(e);
-                }
-            }
+            if (e.Button == MouseButtons.Left && bar.BeginDrag(e.Location)) OnMouseMove(e);
             base.OnMouseDown(e);
         }
 
         protected override void OnMouseUp(MouseEventArgs e)
         {
-            if (thumbDrag) thumbDrag = false;
-            else if (e.Button == MouseButtons.Left)
+            if (!bar.EndDrag() && e.Button == MouseButtons.Left)
             {
                 int ply = PlyAt(e.Location);
                 if (ply > 0 && PlySelected != null) PlySelected(ply);
@@ -171,14 +128,19 @@ namespace ChessGame
 
         protected override void OnMouseWheel(MouseEventArgs e)
         {
-            scroll = Math.Max(0, Math.Min(MaxScroll, scroll - Math.Sign(e.Delta) * RowH * 3));
+            bar.Wheel(e.Delta, RowH * 3);
             Invalidate();
             base.OnMouseWheel(e);
         }
 
+        void IWheelTarget.Wheel(int delta)
+        {
+            OnMouseWheel(new MouseEventArgs(MouseButtons.None, 0, Width / 2, Height / 2, delta));
+        }
+
         protected override void OnSizeChanged(EventArgs e)
         {
-            if (scroll > MaxScroll) scroll = MaxScroll;
+            bar.Clamp();
             base.OnSizeChanged(e);
         }
 
@@ -203,11 +165,11 @@ namespace ChessGame
 
             int listW = Width - Ui.S(10);
             int cellW = (listW - NumberW) / 2;
-            int firstRow = Math.Max(0, scroll / RowH);
+            int firstRow = Math.Max(0, bar.Offset / RowH);
             Font number = Ui.Font(9f);
             for (int row = firstRow; row < Rows; row++)
             {
-                int y = row * RowH - scroll;
+                int y = row * RowH - bar.Offset;
                 if (y > Height) break;
                 if (row % 2 == 1)
                     using (SolidBrush b = new SolidBrush(Ui.Alpha(t.Field, t.IsDark ? 90 : 120)))
@@ -226,13 +188,7 @@ namespace ChessGame
                 }
             }
 
-            RectangleF thumb = ThumbRect();
-            if (!thumb.IsEmpty)
-            {
-                float w = thumbHover || thumbDrag ? Ui.S(6) : Ui.S(4);
-                RectangleF tr = new RectangleF(Width - Ui.S(6) - w / 2f, thumb.Y, w, thumb.Height);
-                Ui.FillRound(g, Ui.Alpha(t.Muted, thumbHover || thumbDrag ? 200 : 120), tr, w / 2f);
-            }
+            bar.Paint(g, t);
         }
 
         /// <summary>Figurine algebraic notation: the first letter of a piece move becomes the piece symbol.</summary>

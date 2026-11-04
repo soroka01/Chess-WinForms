@@ -11,8 +11,8 @@ namespace ChessGame
         Label lblVersion;
         readonly ToolTip versionTip = new ToolTip();
         UpdateInfo update;            // the newest release, kept only while it is newer than this build
-        bool checkingForUpdate;
-        bool showChecking;            // a check the user asked for is running: say so on the label
+        volatile bool checkingForUpdate;
+        volatile bool showChecking;   // a check the user asked for is running: say so on the label
 
         Label BuildVersionLabel()
         {
@@ -70,11 +70,7 @@ namespace ChessGame
                 checkingForUpdate = false;
                 showChecking = false;
                 if (closing || IsDisposed) return;
-                if (info != null)
-                {
-                    UpdateChecker.Record(info);
-                    update = info.IsNewer ? info : null;
-                }
+                if (info != null) update = info.IsNewer ? info : null;   // the checker has recorded the attempt already
                 ShowVersion();
                 if (!manual) return;
                 if (info == null)
@@ -83,6 +79,11 @@ namespace ChessGame
                     OfferUpdate();
                 else
                     AskDialog.Info(this, "Обновления", "У вас последняя версия: " + AppInfo.Version + ".");
+            }, delegate
+            {
+                // the window could not take the answer (it is closing): nothing to show, but never stay in "checking"
+                checkingForUpdate = false;
+                showChecking = false;
             });
         }
 

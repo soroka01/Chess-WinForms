@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Text;
+using System.Threading;
 
 namespace ChessGame
 {
@@ -11,17 +13,20 @@ namespace ChessGame
     ///   T id line        a private line (only member 'id' reacts)
     ///   T id !KICK       the host drops a member (the member leaves by itself)
     /// There is no relay: nobody forwards anything, so RelayFilter has no meaning here (receivers filter instead).
+    /// Like the LAN transport, every event is posted to the context of the creating (UI) thread, never raised inside a call of ours.
     /// </summary>
     public sealed class SteamRoomTransport : IRoomTransport, IOwnershipTransport, IListingTransport
     {
         public const int MaxMembers = 10;
         const int MaxLine = 2048;
+        const int MaxChatBytes = 4096;   // Steam refuses a lobby chat message larger than this
 
         readonly ILobbyService svc;
+        readonly SynchronizationContext ui;
         readonly string myName;
         readonly bool hostMode;
         readonly ulong joinLobby;
-        readonly Dictionary<string, string> names = new Dictionary<string, string>();
+        readonly HashSet<string> introduced = new HashSet<string>();   // members whose HELLO we have heard
         ulong lobby;
         string myId = "";
         string hostId = "";
@@ -36,6 +41,7 @@ namespace ChessGame
 
         SteamRoomTransport(ILobbyService service, string name, bool host, ulong joinId)
         {
+            ui = UiContext.Capture("SteamRoomTransport");
             svc = service;
             myName = NetLink.Sanitize(name);
             hostMode = host;
@@ -61,9 +67,6 @@ namespace ChessGame
         public string HostId { get { return hostId; } }
         public string MyName { get { return myName; } }
 
-        /// <summary>The lobby id (so that the app can show or log it).</summary>
-        public ulong LobbyId { get { return lobby; } }
-
         /// <summary>Not used: nothing is relayed through a lobby.</summary>
         public Func<string, string, bool> RelayFilter { get; set; }
 
@@ -84,7 +87,7 @@ namespace ChessGame
                     svc.SetLobbyData(id, "host", myName);
                     svc.SetLobbyData(id, "players", "1");
                     svc.SetLobbyData(id, "watchers", "0");
-                    if (Connected != null) Connected();
+                    Post(delegate { if (Connected != null) Connected(); });
                 });
             }
             else
@@ -96,7 +99,7 @@ namespace ChessGame
                     lobby = joinLobby;
                     hostId = svc.GetOwner(lobby).ToString();
                     svc.SendChat(lobby, "HELLO " + myName);
-                    if (Connected != null) Connected();
+                    Post(delegate { if (Connected != null) Connected(); });
                 });
             }
         }
@@ -115,8 +118,10 @@ namespace ChessGame
 
         void Send(string text)
         {
-            if (closed || lobby == 0 || text.Length > MaxLine + 24) return;
-            if (!svc.SendChat(lobby, text)) Fail("Соединение потеряно.");
+            if (closed || lobby == 0 || text.Length > MaxLine + 24 || Encoding.UTF8.GetByteCount(text) > MaxChatBytes) return;   // too long: the line is dropped
+            if (svc.SendChat(lobby, text)) return;
+            // Steam refused this message (rate limit, size). That costs one line, not the room; the room is lost only if the lobby is
+            if (Array.IndexOf(svc.GetMembers(lobby), svc.MySteamId) < 0) Fail("Соединение потеряно.");
         }
 
         public void Disconnect(string id)
@@ -139,16 +144,16 @@ namespace ChessGame
             {
                 string name = NetLink.Sanitize(text.Substring(6));
                 if (name.Length == 0) name = "Игрок";
-                bool known = names.ContainsKey(from);
-                names[from] = name;
-                if (!known && IsHost && PeerConnected != null) PeerConnected(from, name);
+                bool known = !introduced.Add(from);
+                if (!known && IsHost) Post(delegate { if (PeerConnected != null) PeerConnected(from, name); });
                 return;
             }
             // Who may do what is decided by the room (RoomSession) from the member list, not here: after the lobby changed hands the
             // new owner has not heard the introductions of the people who were already inside.
             if (text.StartsWith("B ", StringComparison.Ordinal))
             {
-                if (LineReceived != null) LineReceived(from, text.Substring(2));
+                string line = text.Substring(2);
+                Post(delegate { if (LineReceived != null) LineReceived(from, line); });
             }
             else if (text.StartsWith("T ", StringComparison.Ordinal))
             {
@@ -160,7 +165,7 @@ namespace ChessGame
                     if (from == hostId) Fail("Хост исключил вас из комнаты.");
                     return;
                 }
-                if (LineReceived != null) LineReceived(from, rest);
+                Post(delegate { if (LineReceived != null) LineReceived(from, rest); });
             }
         }
 
@@ -179,10 +184,10 @@ namespace ChessGame
 
         void RaiseGone(string id)
         {
-            names.Remove(id);
+            introduced.Remove(id);
             // also for people whose introduction we never heard: after the lobby changed hands the new owner knows nobody by name,
             // and the room (RoomSession) tolerates ids it does not know
-            if (IsHost && PeerDisconnected != null) PeerDisconnected(id);
+            if (IsHost) Post(delegate { if (PeerDisconnected != null) PeerDisconnected(id); });
         }
 
         // ---------------------------------------------------------------- ownership and listing
@@ -215,7 +220,13 @@ namespace ChessGame
         {
             if (closed) return;
             Shutdown();
-            if (Closed != null) Closed(reason);
+            ui.Post(delegate(object state) { if (Closed != null) Closed(reason); }, null);   // after Shutdown, so not through Post
+        }
+
+        /// <summary>Events leave through the UI queue, in order, and not at all once the transport is closed.</summary>
+        void Post(Action action)
+        {
+            ui.Post(delegate(object state) { if (!closed) action(); }, null);
         }
 
         public void Close()

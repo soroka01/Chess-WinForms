@@ -103,8 +103,23 @@ namespace ChessGame
             MinimumSize = new Size(Ui.S(1040), Ui.S(700));
             ClientSize = new Size(Ui.S(1180), Ui.S(780));
             try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch (Exception) { }
+            WheelRouter.Attach(this);   // the lists scroll under the pointer without taking the focus
 
-            // saved choices first, so that nothing below reacts to them as if the user had clicked
+            LoadSavedSettings();
+            BuildUi();
+            RestoreSavedChoices();
+            WireEvents();
+
+            loadingSettings = false;
+            ApplyTheme();
+            ApplyMode();
+            if (VsComputer && ComputerIsWhite) board.Flipped = true;   // the user always sits at the bottom
+            RefreshAll();
+        }
+
+        /// <summary>Saved choices first, so that nothing built or wired afterwards reacts to them as if the user had clicked.</summary>
+        void LoadSavedSettings()
+        {
             loadingSettings = true;
             Theme.Set(Theme.FromName(Settings.Get("theme", "dark")));
             BoardSchemes.Set(Settings.GetInt("board", 0));
@@ -112,9 +127,11 @@ namespace ChessGame
             int savedW = Settings.GetInt("w", 0), savedH = Settings.GetInt("h", 0);
             if (savedW >= MinimumSize.Width && savedH >= MinimumSize.Height && savedW < 6000 && savedH < 4000)
                 ClientSize = new Size(savedW, savedH);
+        }
 
-            BuildUi();
-
+        /// <summary>Puts the saved mode, side, level and transport on the controls that BuildUi has just made (silently).</summary>
+        void RestoreSavedChoices()
+        {
             int savedMode = Math.Max(0, Math.Min(2, Settings.GetInt("mode", 0)));
             mode = (Mode)savedMode;
             segMode.SelectSilently(savedMode);
@@ -123,7 +140,10 @@ namespace ChessGame
             sliderLevel.SetSilently(Math.Max(0, Math.Min(Levels.Length - 1, Settings.GetInt("level", 2))));
             segTransport.SelectSilently(Math.Max(0, Math.Min(1, Settings.GetInt("transport", 0))));
             segHostSeat.SelectSilently(Math.Max(0, Math.Min(2, Settings.GetInt("hostseat", 0))));
+        }
 
+        void WireEvents()
+        {
             board.Game = game;
             board.UserMove += OnUserMove;
             board.ResultActionClicked += delegate { OnNewGameClicked(); };
@@ -160,12 +180,6 @@ namespace ChessGame
             };
             FormClosed += delegate { Theme.Changed -= ApplyTheme; };
             Shown += delegate { AutoCheckForUpdate(); };
-
-            loadingSettings = false;
-            ApplyTheme();
-            ApplyMode();
-            if (VsComputer && ComputerIsWhite) board.Flipped = true;   // the user always sits at the bottom
-            RefreshAll();
         }
 
         protected override void OnHandleCreated(EventArgs e)
@@ -175,6 +189,16 @@ namespace ChessGame
             NativeUi.StyleTitleBar(Handle, t.IsDark, t.Window, t.Text);
         }
 
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                premoveTimer.Dispose();
+                voiceTimer.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+
         // ---------------------------------------------------------------- UI construction
 
         void BuildUi()
@@ -182,18 +206,7 @@ namespace ChessGame
             Theme t = Theme.Current;
             BackColor = t.Window;
 
-            // ---- left: board between two player strips
-            boardArea = new BoardArea();
-            boardArea.Dock = DockStyle.Fill;
-            topBar = new PlayerBar();
-            bottomBar = new PlayerBar();
-            board = new BoardControl();
-            boardArea.TopBar = topBar;
-            boardArea.BottomBar = bottomBar;
-            boardArea.Board = board;
-            boardArea.Controls.Add(topBar);
-            boardArea.Controls.Add(board);
-            boardArea.Controls.Add(bottomBar);
+            BuildBoardArea();
 
             // ---- right: control panel
             side = new BufferedPanel();
@@ -214,7 +227,49 @@ namespace ChessGame
             sideTable.RowStyles.Add(new RowStyle(SizeType.Absolute, Ui.S(54)));    // actions
             sideTable.RowStyles.Add(new RowStyle(SizeType.Absolute, Ui.S(24)));    // version / update notice
 
-            // header: title + three icon buttons
+            BuildHeader();
+
+            segMode = new Segmented();
+            segMode.Items = new string[] { "Компьютер", "Вдвоём", "По сети" };
+            segMode.Prominent = true;
+            segMode.Dock = DockStyle.Fill;
+            segMode.Margin = new Padding(0, 0, 0, Ui.S(12));
+            sideTable.Controls.Add(segMode, 0, 1);
+
+            status = new StatusCard();
+            status.Dock = DockStyle.Fill;
+            status.Margin = new Padding(0, 0, 0, Ui.S(12));
+            sideTable.Controls.Add(status, 0, 2);
+
+            BuildSettingsCard();
+            BuildMovesCard();
+            BuildActions();
+            sideTable.Controls.Add(BuildVersionLabel(), 0, 6);
+
+            side.Controls.Add(sideTable);
+            Controls.Add(boardArea);
+            Controls.Add(side);
+        }
+
+        /// <summary>Left: the board between two player strips.</summary>
+        void BuildBoardArea()
+        {
+            boardArea = new BoardArea();
+            boardArea.Dock = DockStyle.Fill;
+            topBar = new PlayerBar();
+            bottomBar = new PlayerBar();
+            board = new BoardControl();
+            boardArea.TopBar = topBar;
+            boardArea.BottomBar = bottomBar;
+            boardArea.Board = board;
+            boardArea.Controls.Add(topBar);
+            boardArea.Controls.Add(board);
+            boardArea.Controls.Add(bottomBar);
+        }
+
+        /// <summary>Header of the side panel: the title and three icon buttons.</summary>
+        void BuildHeader()
+        {
             headerTable = new BufferedTable();
             headerTable.Dock = DockStyle.Fill;
             headerTable.ColumnCount = 4;
@@ -238,20 +293,11 @@ namespace ChessGame
             headerTable.Controls.Add(btnSound, 2, 0);
             headerTable.Controls.Add(btnTheme, 3, 0);
             sideTable.Controls.Add(headerTable, 0, 0);
+        }
 
-            segMode = new Segmented();
-            segMode.Items = new string[] { "Компьютер", "Вдвоём", "По сети" };
-            segMode.Prominent = true;
-            segMode.Dock = DockStyle.Fill;
-            segMode.Margin = new Padding(0, 0, 0, Ui.S(12));
-            sideTable.Controls.Add(segMode, 0, 1);
-
-            status = new StatusCard();
-            status.Dock = DockStyle.Fill;
-            status.Margin = new Padding(0, 0, 0, Ui.S(12));
-            sideTable.Controls.Add(status, 0, 2);
-
-            // settings card: rows appear and disappear with the mode
+        /// <summary>The settings card: rows appear and disappear with the mode.</summary>
+        void BuildSettingsCard()
+        {
             settingsCard = new CardPanel();
             settingsCard.Dock = DockStyle.Fill;
             settingsCard.AutoSize = true;
@@ -295,8 +341,11 @@ namespace ChessGame
 
             settingsCard.Controls.Add(settingsTable);
             sideTable.Controls.Add(settingsCard, 0, 3);
+        }
 
-            // moves card
+        /// <summary>The card with the move list (and the chat as its second tab).</summary>
+        void BuildMovesCard()
+        {
             movesCard = new CardPanel();
             movesCard.Dock = DockStyle.Fill;
             movesCard.Padding = new Padding(Ui.S(10), Ui.S(10), Ui.S(8), Ui.S(10));
@@ -313,8 +362,11 @@ namespace ChessGame
             onCard.Add(movesTitle);
             BuildChatUi(movesCard, moveList, movesTitle);   // the chat is a second tab of this card
             sideTable.Controls.Add(movesCard, 0, 4);
+        }
 
-            // actions
+        /// <summary>New game, undo, hint and flip.</summary>
+        void BuildActions()
+        {
             actionsTable = new BufferedTable();
             actionsTable.Dock = DockStyle.Fill;
             actionsTable.ColumnCount = 4;
@@ -337,11 +389,6 @@ namespace ChessGame
             actionsTable.Controls.Add(btnHint, 2, 0);
             actionsTable.Controls.Add(btnFlip, 3, 0);
             sideTable.Controls.Add(actionsTable, 0, 5);
-            sideTable.Controls.Add(BuildVersionLabel(), 0, 6);
-
-            side.Controls.Add(sideTable);
-            Controls.Add(boardArea);
-            Controls.Add(side);
         }
 
         static FlatButton IconButton(string glyph, string fallback, string tip)
@@ -655,8 +702,6 @@ namespace ChessGame
             }
             catch (Exception) { }
         }
-
-        // ---------------------------------------------------------------- computer opponent
 
         // ---------------------------------------------------------------- queued move (premove)
 

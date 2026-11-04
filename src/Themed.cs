@@ -17,29 +17,13 @@ namespace ChessGame
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer
                 | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
             TabStop = true;
+            ThemeWatch.Attach(this, delegate { Invalidate(); });
         }
 
         protected Theme T { get { return Theme.Current; } }
 
         /// <summary>The colour of whatever the control sits on.</summary>
         protected Color Backdrop { get { return Parent != null ? Parent.BackColor : T.Window; } }
-
-        protected override void OnHandleCreated(EventArgs e)
-        {
-            base.OnHandleCreated(e);
-            Theme.Changed += OnThemeChanged;
-        }
-
-        protected override void OnHandleDestroyed(EventArgs e)
-        {
-            Theme.Changed -= OnThemeChanged;
-            base.OnHandleDestroyed(e);
-        }
-
-        void OnThemeChanged()
-        {
-            if (IsHandleCreated && !IsDisposed) Invalidate();
-        }
 
         protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
         protected override void OnMouseLeave(EventArgs e) { hover = false; pressed = false; Invalidate(); base.OnMouseLeave(e); }
@@ -68,6 +52,7 @@ namespace ChessGame
         string fallback = "";
         ButtonStyle style = ButtonStyle.Normal;
         bool active;
+        bool keyHeld;   // Space or Enter went down on this button and has not been released yet
 
         public FlatButton()
         {
@@ -106,12 +91,29 @@ namespace ChessGame
             if (e.KeyCode == Keys.Space || e.KeyCode == Keys.Enter)
             {
                 keyboardFocus = true;
+                keyHeld = true;   // auto-repeat only sets it again; the click comes once, on release
                 e.Handled = true;
                 Invalidate();
-                OnClick(EventArgs.Empty);
             }
             else if (e.KeyCode == Keys.Tab || e.KeyCode == Keys.Left || e.KeyCode == Keys.Right) keyboardFocus = true;
             base.OnKeyDown(e);
+        }
+
+        protected override void OnKeyUp(KeyEventArgs e)
+        {
+            if ((e.KeyCode == Keys.Space || e.KeyCode == Keys.Enter) && keyHeld)
+            {
+                keyHeld = false;
+                e.Handled = true;
+                OnClick(EventArgs.Empty);
+            }
+            base.OnKeyUp(e);
+        }
+
+        protected override void OnLostFocus(EventArgs e)
+        {
+            keyHeld = false;
+            base.OnLostFocus(e);
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -470,26 +472,13 @@ namespace ChessGame
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer
                 | ControlStyles.ResizeRedraw, true);
             BackColor = Theme.Current.Card;
+            ThemeWatch.Attach(this, delegate { BackColor = Theme.Current.Card; Invalidate(); });
         }
 
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
             BackColor = Theme.Current.Card;
-            Theme.Changed += OnThemeChanged;
-        }
-
-        protected override void OnHandleDestroyed(EventArgs e)
-        {
-            Theme.Changed -= OnThemeChanged;
-            base.OnHandleDestroyed(e);
-        }
-
-        void OnThemeChanged()
-        {
-            if (IsDisposed) return;
-            BackColor = Theme.Current.Card;
-            Invalidate();
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -559,8 +548,9 @@ namespace ChessGame
             Text = title;
             int width = Ui.S(440), pad = Ui.S(22);
             Size textSize = TextRenderer.MeasureText(text, Ui.Font(10f), new Size(width - pad * 2, 0),
-                TextFormatFlags.WordBreak | TextFormatFlags.NoPadding);
+                TextFormatFlags.WordBreak | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
             Label body = new Label();
+            body.UseMnemonic = false;   // a name like "A&B" is shown as it is
             body.Text = text;
             body.Font = Ui.Font(10f);
             body.ForeColor = Theme.Current.Text;
@@ -593,22 +583,11 @@ namespace ChessGame
             };
         }
 
-        static AskDialog current;
-
-        /// <summary>Closes the question that is on screen right now (answer: no), e.g. when it became pointless.</summary>
-        public static void CloseCurrent()
-        {
-            AskDialog d = current;
-            if (d != null && !d.IsDisposed) { d.result = false; d.DialogResult = DialogResult.Cancel; }
-        }
-
         public static bool Ask(IWin32Window owner, string title, string text, string yes, string no)
         {
             using (AskDialog d = new AskDialog(title, text, yes, no, ButtonStyle.Primary))
             {
-                current = d;
-                try { d.ShowDialog(owner); }
-                finally { current = null; }
+                d.ShowDialog(owner);
                 return d.result;
             }
         }

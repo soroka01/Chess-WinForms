@@ -13,14 +13,11 @@ namespace ChessGame
     /// Wheel scrolling and a thin own scrollbar like MoveListControl; follows new messages unless the user scrolled up.
     /// Right-click or double-click on a bubble copies its text.
     /// </summary>
-    public sealed class ChatControl : Control
+    public sealed class ChatControl : Control, IWheelTarget
     {
         const int MaxMessages = 500;   // the oldest are dropped beyond this
         const int MaxChars = 2000;     // one message never gets longer than this
         const int Theirs = 0, Mine = 1, Notice = 2;
-
-        const TextFormatFlags Wrap = TextFormatFlags.WordBreak | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix
-            | TextFormatFlags.Left | TextFormatFlags.Top;
 
         sealed class Msg
         {
@@ -39,10 +36,7 @@ namespace ChessGame
 
         readonly List<Msg> msgs = new List<Msg>();
         int contentH;
-        int scroll;                 // pixels
-        bool thumbDrag;
-        int thumbGrab;
-        bool thumbHover;
+        readonly ThinScrollbar bar;
 
         // metrics of the current layout
         int colLeft, colRight, maxText, lineH, timeW, timeH, noticeW;
@@ -50,13 +44,15 @@ namespace ChessGame
         public ChatControl()
         {
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer
-                | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
+                | ControlStyles.ResizeRedraw, true);
+            SetStyle(ControlStyles.Selectable, false);   // hovering or clicking must not take the focus from the chat box; the wheel comes through WheelRouter
             TabStop = false;
+            bar = new ThinScrollbar(this, delegate { return contentH; });
+            ThemeWatch.Attach(this, delegate { Invalidate(); });
             contentH = Ui.S(16);
         }
 
         Theme T { get { return Theme.Current; } }
-        int MaxScroll { get { return Math.Max(0, contentH - Height); } }
         int EdgePad { get { return Ui.S(8); } }
 
         public int Count { get { return msgs.Count; } }
@@ -85,7 +81,7 @@ namespace ChessGame
         public void Clear()
         {
             msgs.Clear();
-            scroll = 0;
+            bar.Offset = 0;
             contentH = EdgePad * 2;
             Invalidate();
         }
@@ -95,7 +91,7 @@ namespace ChessGame
             if (text == null) text = "";
             if (text.Length > MaxChars) text = text.Substring(0, MaxChars);
             // our own message always scrolls into view; the opponent's only when we were already at the end
-            bool follow = kind == Mine || scroll >= MaxScroll - 2;
+            bool follow = kind == Mine || bar.Offset >= bar.MaxOffset - 2;
 
             Msg m = new Msg();
             m.Kind = kind;
@@ -116,75 +112,12 @@ namespace ChessGame
             }
             msgs.Add(m);
             Arrange();
-            if (follow) scroll = MaxScroll;
-            else scroll = Math.Max(0, Math.Min(MaxScroll, scroll - shift));
+            if (follow) bar.ScrollToEnd();
+            else bar.Offset = Math.Max(0, Math.Min(bar.MaxOffset, bar.Offset - shift));
             Invalidate();
         }
 
-        protected override void OnHandleCreated(EventArgs e)
-        {
-            base.OnHandleCreated(e);
-            Theme.Changed += OnThemeChanged;
-        }
-
-        protected override void OnHandleDestroyed(EventArgs e)
-        {
-            Theme.Changed -= OnThemeChanged;
-            base.OnHandleDestroyed(e);
-        }
-
-        void OnThemeChanged() { if (!IsDisposed) Invalidate(); }
-
         // ------------------------------------------------------------ layout
-
-        static Bitmap measureBmp;
-        static Graphics measureG;
-
-        /// <summary>Measured on a bitmap DC like the one painting uses: the screen DC wraps a pixel or two differently.</summary>
-        static Size MeasureText(string text, Font font, int width)
-        {
-            if (measureG == null)
-            {
-                measureBmp = new Bitmap(1, 1);
-                measureG = Graphics.FromImage(measureBmp);
-            }
-            return TextRenderer.MeasureText(measureG, text, font, new Size(width, 0), Wrap);
-        }
-
-        /// <summary>GDI does not break a single word wider than the line (it cuts it with "..."), so do it here.</summary>
-        static string BreakLongWords(string text, Font font, int width)
-        {
-            StringBuilder sb = null;
-            int pos = 0;   // text up to pos is already copied to sb
-            int i = 0;
-            while (i < text.Length)
-            {
-                if (char.IsWhiteSpace(text[i])) { i++; continue; }
-                int start = i;
-                while (i < text.Length && !char.IsWhiteSpace(text[i])) i++;
-                if (i - start < 6 || MeasureText(text.Substring(start, i - start), font, 10000).Width <= width) continue;
-
-                if (sb == null) sb = new StringBuilder(text.Length + 16);
-                sb.Append(text, pos, start - pos);
-                int at = start;
-                while (at < i)
-                {
-                    int lo = 1, hi = i - at;   // the longest piece that still fits (at least one char)
-                    while (lo < hi)
-                    {
-                        int mid = (lo + hi + 1) / 2;
-                        if (MeasureText(text.Substring(at, mid), font, 10000).Width <= width) lo = mid; else hi = mid - 1;
-                    }
-                    sb.Append(text, at, lo);
-                    at += lo;
-                    if (at < i) sb.Append('\n');
-                }
-                pos = i;
-            }
-            if (sb == null) return text;
-            sb.Append(text, pos, text.Length - pos);
-            return sb.ToString();
-        }
 
         /// <summary>Positions every message; only the ones not yet measured for this width are measured again.</summary>
         void Arrange()
@@ -195,8 +128,8 @@ namespace ChessGame
             int maxBubble = (int)((colRight - colLeft) * 0.78f);
             maxText = Math.Max(Ui.S(24), maxBubble - Ui.S(10) * 2);
             noticeW = Math.Max(Ui.S(40), listW - Ui.S(32));
-            lineH = MeasureText("Ag", Ui.Font(10f), 10000).Height;
-            Size ts = MeasureText("00:00", Ui.Font(7.5f), 10000);
+            lineH = TextWrap.MeasureText("Ag", Ui.Font(10f), 10000).Height;
+            Size ts = TextWrap.MeasureText("00:00", Ui.Font(7.5f), 10000);
             timeW = ts.Width + Ui.S(1);
             timeH = ts.Height;
 
@@ -222,8 +155,8 @@ namespace ChessGame
             m.LaidW = Width;
             if (m.Kind == Notice)
             {
-                m.Shown = BreakLongWords(m.Text, Ui.Font(8.5f), noticeW);
-                Size ns = MeasureText(m.Shown, Ui.Font(8.5f), noticeW);
+                m.Shown = TextWrap.BreakLongWords(m.Text, Ui.Font(8.5f), noticeW, 6);
+                Size ns = TextWrap.MeasureText(m.Shown, Ui.Font(8.5f), noticeW);
                 m.BX = Ui.S(16);
                 m.BW = noticeW;
                 m.TW = noticeW;
@@ -237,13 +170,13 @@ namespace ChessGame
             m.AuthorH = 0;
             if (m.Kind == Theirs && m.Author != null)
             {
-                Size an = MeasureText(m.Author, Ui.Font(8.5f, FontStyle.Bold), 10000);
+                Size an = TextWrap.MeasureText(m.Author, Ui.Font(8.5f, FontStyle.Bold), 10000);
                 m.AuthorW = Math.Min(maxText, an.Width + Ui.S(2));
                 m.AuthorH = an.Height + Ui.S(1);
             }
             // an empty text still gets one line
-            m.Shown = BreakLongWords(m.Text.Length == 0 ? " " : m.Text, Ui.Font(10f), maxText);
-            Size sz = MeasureText(m.Shown, Ui.Font(10f), maxText);
+            m.Shown = TextWrap.BreakLongWords(m.Text.Length == 0 ? " " : m.Text, Ui.Font(10f), maxText, 6);
+            Size sz = TextWrap.MeasureText(m.Shown, Ui.Font(10f), maxText);
             m.TW = Math.Min(maxText, sz.Width + Ui.S(2));
             m.TH = sz.Height;
 
@@ -278,38 +211,29 @@ namespace ChessGame
         {
             if (msgs.Count > 0)
             {
-                bool atBottom = scroll >= MaxScroll - 2;
-                int first = FirstVisible(scroll);
-                int into = scroll - msgs[first].Y;   // keep the same message at the top of the view
+                bool atBottom = bar.Offset >= bar.MaxOffset - 2;
+                int first = FirstVisible(bar.Offset);
+                int into = bar.Offset - msgs[first].Y;   // keep the same message at the top of the view
                 Arrange();
-                scroll = atBottom ? MaxScroll : Math.Max(0, Math.Min(MaxScroll, msgs[first].Y + into));
+                bar.Offset = atBottom ? bar.MaxOffset : Math.Max(0, Math.Min(bar.MaxOffset, msgs[first].Y + into));
             }
-            else if (scroll > MaxScroll) scroll = MaxScroll;
+            else bar.Clamp();
             base.OnSizeChanged(e);
         }
 
         // ------------------------------------------------------------ geometry
 
-        RectangleF ThumbRect()
-        {
-            if (MaxScroll <= 0) return RectangleF.Empty;
-            float trackH = Height - Ui.S(8);
-            float thumbH = Math.Max(Ui.S(28), trackH * Height / contentH);
-            float y = Ui.S(4) + (trackH - thumbH) * scroll / MaxScroll;
-            return new RectangleF(Width - Ui.S(8), y, Ui.S(5), thumbH);
-        }
-
         Rectangle HitRect(Msg m)
         {
-            return new Rectangle(m.BX, m.Y - scroll, m.BW, m.H);
+            return new Rectangle(m.BX, m.Y - bar.Offset, m.BW, m.H);
         }
 
         Msg MessageAt(Point p)
         {
-            if (p.X >= Width - Ui.S(12) && MaxScroll > 0) return null;
-            for (int i = FirstVisible(scroll); i < msgs.Count; i++)
+            if (bar.InGutter(p.X)) return null;
+            for (int i = FirstVisible(bar.Offset); i < msgs.Count; i++)
             {
-                if (msgs[i].Y - scroll > Height) break;
+                if (msgs[i].Y - bar.Offset > Height) break;
                 if (HitRect(msgs[i]).Contains(p)) return msgs[i];
             }
             return null;
@@ -317,28 +241,19 @@ namespace ChessGame
 
         // ------------------------------------------------------------ input
 
-        protected override void OnMouseEnter(EventArgs e)
-        {
-            if (!Focused) Focus();   // so that the wheel works without clicking first
-            base.OnMouseEnter(e);
-        }
-
         protected override void OnMouseMove(MouseEventArgs e)
         {
-            if (thumbDrag)
+            if (bar.Dragging)
             {
-                float trackH = Height - Ui.S(8);
-                RectangleF th = ThumbRect();
-                float range = trackH - th.Height;
-                if (range > 0) scroll = (int)Math.Max(0, Math.Min(MaxScroll, (e.Y - thumbGrab - Ui.S(4)) / range * MaxScroll));
+                bar.DragTo(e.Y);
                 Invalidate();
             }
             else
             {
-                bool overThumb = ThumbRect().Contains(e.Location) || (MaxScroll > 0 && e.X >= Width - Ui.S(12));
-                if (overThumb != thumbHover)
+                bool overThumb = bar.IsOverThumb(e.Location);
+                if (overThumb != bar.Hover)
                 {
-                    thumbHover = overThumb;
+                    bar.Hover = overThumb;
                     Invalidate();
                 }
             }
@@ -347,36 +262,26 @@ namespace ChessGame
 
         protected override void OnMouseLeave(EventArgs e)
         {
-            thumbHover = false;
+            bar.Hover = false;
             Invalidate();
             base.OnMouseLeave(e);
         }
 
         protected override void OnMouseDown(MouseEventArgs e)
         {
-            if (e.Button == MouseButtons.Left)
-            {
-                RectangleF th = ThumbRect();
-                if (MaxScroll > 0 && e.X >= Width - Ui.S(12))
-                {
-                    thumbDrag = true;
-                    thumbGrab = th.Contains(e.Location) ? (int)(e.Y - th.Y) : (int)(th.Height / 2);
-                    OnMouseMove(e);
-                }
-            }
+            if (e.Button == MouseButtons.Left && bar.BeginDrag(e.Location)) OnMouseMove(e);
             base.OnMouseDown(e);
         }
 
         protected override void OnMouseUp(MouseEventArgs e)
         {
-            if (thumbDrag) thumbDrag = false;
-            else if (e.Button == MouseButtons.Right) CopyAt(e.Location);
+            if (!bar.EndDrag() && e.Button == MouseButtons.Right) CopyAt(e.Location);
             base.OnMouseUp(e);
         }
 
         protected override void OnMouseDoubleClick(MouseEventArgs e)
         {
-            if (e.Button == MouseButtons.Left && !thumbDrag) CopyAt(e.Location);
+            if (e.Button == MouseButtons.Left && !bar.Dragging) CopyAt(e.Location);
             base.OnMouseDoubleClick(e);
         }
 
@@ -390,9 +295,14 @@ namespace ChessGame
 
         protected override void OnMouseWheel(MouseEventArgs e)
         {
-            scroll = Math.Max(0, Math.Min(MaxScroll, scroll - Math.Sign(e.Delta) * lineH * 4));
+            bar.Wheel(e.Delta, lineH * 4);
             Invalidate();
             base.OnMouseWheel(e);
+        }
+
+        void IWheelTarget.Wheel(int delta)
+        {
+            OnMouseWheel(new MouseEventArgs(MouseButtons.None, 0, Width / 2, Height / 2, delta));
         }
 
         // ------------------------------------------------------------ author colours
@@ -444,10 +354,10 @@ namespace ChessGame
             float radius = Ui.S(12f);
             int padX = Ui.S(10), padTop = Ui.S(6);
 
-            for (int i = FirstVisible(scroll); i < msgs.Count; i++)
+            for (int i = FirstVisible(bar.Offset); i < msgs.Count; i++)
             {
                 Msg m = msgs[i];
-                int y = m.Y - scroll;
+                int y = m.Y - bar.Offset;
                 if (y > Height) break;
 
                 if (m.Kind == Notice)
@@ -477,13 +387,7 @@ namespace ChessGame
                     TextFormatFlags.Right | TextFormatFlags.Top);
             }
 
-            RectangleF thumb = ThumbRect();
-            if (!thumb.IsEmpty)
-            {
-                float w = thumbHover || thumbDrag ? Ui.S(6) : Ui.S(4);
-                RectangleF tr = new RectangleF(Width - Ui.S(6) - w / 2f, thumb.Y, w, thumb.Height);
-                Ui.FillRound(g, Ui.Alpha(t.Muted, thumbHover || thumbDrag ? 200 : 120), tr, w / 2f);
-            }
+            bar.Paint(g, t);
         }
     }
 }

@@ -17,7 +17,9 @@ namespace ChessGame
 
     /// <summary>
     /// Raw calls into the Steamworks "flat" C API (steam_api64.dll). The DLL is not shipped with this game:
-    /// it is taken from the Steam installation (any Steam game contains a copy) after checking Valve's signature.
+    /// it is taken from the Steam installation (any Steam game contains a copy) after a sanity check: the file carries a certificate
+    /// issued to Valve and exports every function we call. That is not a verification of the signature (no hash or chain check)
+    /// and not a trust boundary; the file comes from the user's own Steam installation.
     /// </summary>
     static class SteamNative
     {
@@ -172,10 +174,10 @@ namespace ChessGame
             List<string> tried = new List<string>();
             List<string> rejected = new List<string>();
             List<string> first = new List<string>();
-            first.Add(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, DllName));
+            first.Add(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, DllName));   // next to the program: kept as it is
             string fromEnv = Environment.GetEnvironmentVariable("CHESS_STEAM_API");
-            if (!string.IsNullOrEmpty(fromEnv)) first.Add(fromEnv);
-            if (last != null && last.SameContent(lastNow)) first.Add(last.Path);
+            if (!string.IsNullOrEmpty(fromEnv) && !IsNetworkPath(fromEnv)) first.Add(fromEnv);
+            if (last != null && last.SameContent(lastNow) && !IsNetworkPath(last.Path)) first.Add(last.Path);
             first.AddRange(NewestFirst(FindInSteamLibraries(false)));
             if (TryLoadAny(first, tried, rejected)) { OnLoaded(last); return; }
 
@@ -216,7 +218,7 @@ namespace ChessGame
             return TryLoadAny(paths, tried, rejected);
         }
 
-        /// <summary>Loads the first DLL that is signed by Valve, has every function we call and did not fail before.</summary>
+        /// <summary>Loads the first DLL that carries a certificate issued to Valve, has every function we call and did not fail before.</summary>
         static bool TryLoadAny(IEnumerable<string> paths, List<string> tried, List<string> rejected)
         {
             foreach (string path in paths)
@@ -226,7 +228,7 @@ namespace ChessGame
                 tried.Add(key);
                 try
                 {
-                    if (!File.Exists(path) || !IsSignedByValve(path)) continue;
+                    if (!File.Exists(path) || !CarriesValveCertificate(path)) continue;
                     if (SteamDllMemory.AnyBad && SteamDllMemory.IsBad(SteamDllStamp.Of(path)))
                     {
                         rejected.Add(path + ": этот файл уже не заработал (будет проверен снова, когда Steam его обновит)");
@@ -248,6 +250,12 @@ namespace ChessGame
                 catch (Exception) { }
             }
             return false;
+        }
+
+        /// <summary>\\server\share paths: opening them touches the network (SMB, NTLM) and would load a remote DLL.</summary>
+        static bool IsNetworkPath(string path)
+        {
+            return path.StartsWith(@"\\", StringComparison.Ordinal) || path.StartsWith("//", StringComparison.Ordinal);
         }
 
         static List<string> NewestFirst(IEnumerable<string> paths)
@@ -344,7 +352,12 @@ namespace ChessGame
             catch (Exception) { return new Version(0, 0); }
         }
 
-        static bool IsSignedByValve(string path)
+        /// <summary>
+        /// Sanity filter only: CreateFromSignedFile extracts the embedded certificate without verifying the signature, the file hash or
+        /// the chain, so this tells "a file meant to come from Valve" from "some other DLL", nothing more. (The gap between this test
+        /// and LoadLibrary is not closed either; a local attacker who can swap the file already has the user's rights.)
+        /// </summary>
+        static bool CarriesValveCertificate(string path)
         {
             try
             {
@@ -365,6 +378,7 @@ namespace ChessGame
             }
             if (string.IsNullOrEmpty(steam)) yield break;
             steam = steam.Replace('/', '\\');
+            if (IsNetworkPath(steam)) yield break;
             libraries.Add(steam);
             try
             {
@@ -377,7 +391,9 @@ namespace ChessGame
                         if (i < 0) continue;
                         int a = line.IndexOf('"', i + 6);
                         int b = a < 0 ? -1 : line.IndexOf('"', a + 1);
-                        if (a >= 0 && b > a) libraries.Add(line.Substring(a + 1, b - a - 1).Replace(@"\\", @"\"));
+                        if (a < 0 || b <= a) continue;
+                        string lib = line.Substring(a + 1, b - a - 1).Replace(@"\\", @"\");
+                        if (!IsNetworkPath(lib)) libraries.Add(lib);
                     }
                 }
             }
@@ -430,11 +446,8 @@ namespace ChessGame
         const string NotLoggedInText = "Вы не вошли в Steam. Войдите в аккаунт в клиенте Steam и повторите.";
 
         const int CbApiCallCompleted = 703;
-        const int CbLobbyEnter = 504;
         const int CbLobbyChatUpdate = 506;
         const int CbLobbyChatMsg = 507;
-        const int CbLobbyMatchList = 510;
-        const int CbLobbyCreated = 513;
 
         const int LobbyTypePublic = 2;      // friends-only lobbies would not show up in RequestLobbyList
         const int RelationshipFriend = 3;   // k_EFriendRelationshipFriend
@@ -450,16 +463,26 @@ namespace ChessGame
 
         static SteamLobbyService instance;
 
-#pragma warning disable 649   // set only by tests
-        /// <summary>Test switch: keep our own lobby in FindLobbies results.</summary>
-        internal static bool ListOwnLobbies;
-#pragma warning restore 649
-
         readonly IntPtr matchmaking, user, friends;
         readonly int pipe;
-        readonly Timer pump = new Timer();
-        readonly Dictionary<ulong, Action<byte[], bool>> pending = new Dictionary<ulong, Action<byte[], bool>>();
-        readonly IntPtr msgBuffer = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(CallbackMsg)));
+        // created at the very end of the constructor: a constructor that throws (Steam not running) must leave nothing behind
+        readonly Timer pump;
+        readonly IntPtr msgBuffer;
+        bool released;
+
+        const int CallTimeoutMs = 15000;      // an API call that Steam never answers (offline, no connection) fails after this
+        const int AbandonedKeepMs = 120000;   // how long a call that timed out is still remembered, to undo a late success
+
+        sealed class PendingCall
+        {
+            public Action<byte[], bool> Handler;
+            public Action<byte[], bool> Late;   // a result that arrives after the timeout (null: ignore it)
+            public int Deadline;                // Environment.TickCount
+        }
+
+        readonly Dictionary<ulong, PendingCall> pending = new Dictionary<ulong, PendingCall>();
+        readonly Dictionary<ulong, PendingCall> abandoned = new Dictionary<ulong, PendingCall>();
+        readonly List<Action> deferred = new List<Action>();   // completions that are due on the next pump tick
 
         public ulong MySteamId { get; private set; }
         public string MyName { get; private set; }
@@ -477,9 +500,16 @@ namespace ChessGame
         public static void Release()
         {
             if (instance == null) return;
-            instance.pump.Stop();
-            try { SteamNative.SteamAPI_Shutdown(); } catch (Exception) { }
+            SteamLobbyService s = instance;
             instance = null;
+            s.released = true;
+            s.pump.Stop();
+            s.pump.Dispose();
+            s.pending.Clear();
+            s.abandoned.Clear();
+            s.deferred.Clear();
+            try { SteamNative.SteamAPI_Shutdown(); } catch (Exception) { }
+            Marshal.FreeHGlobal(s.msgBuffer);
         }
 
         SteamLobbyService()
@@ -531,10 +561,27 @@ namespace ChessGame
                 SteamNative.SteamAPI_Shutdown();   // do not stay "in game" after a failed attempt
                 throw;
             }
+            catch (Exception)
+            {
+                try { SteamNative.SteamAPI_Shutdown(); } catch (Exception) { }
+                throw;
+            }
 
-            pump.Interval = 40;
-            pump.Tick += delegate { Pump(); };
-            pump.Start();
+            msgBuffer = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(CallbackMsg)));
+            try
+            {
+                pump = new Timer();
+                pump.Interval = 40;
+                pump.Tick += delegate { Pump(); };
+                pump.Start();
+            }
+            catch (Exception)
+            {
+                if (pump != null) pump.Dispose();
+                Marshal.FreeHGlobal(msgBuffer);
+                try { SteamNative.SteamAPI_Shutdown(); } catch (Exception) { }
+                throw;
+            }
         }
 
         /// <summary>The API needs to know which app we pretend to be when we are not started by Steam.</summary>
@@ -559,7 +606,9 @@ namespace ChessGame
 
         void Pump()
         {
-            List<Action> after = new List<Action>();
+            if (released) return;
+            List<Action> after = new List<Action>(deferred);
+            deferred.Clear();
             SteamNative.SteamAPI_ManualDispatch_RunFrame(pipe);
             while (SteamNative.SteamAPI_ManualDispatch_GetNextCallback(pipe, msgBuffer))
             {
@@ -567,7 +616,7 @@ namespace ChessGame
                 try
                 {
                     if (msg.Callback == CbApiCallCompleted)
-                        HandleCallCompleted(msg.Param, after);
+                        HandleCallCompleted(msg.Param, msg.ParamSize, after);
                     else
                         HandleCallback(msg.Callback, msg.Param, msg.ParamSize, after);
                 }
@@ -577,18 +626,89 @@ namespace ChessGame
                     SteamNative.SteamAPI_ManualDispatch_FreeLastCallback(pipe);
                 }
             }
-            foreach (Action a in after) a();   // run handlers once Steam's queue is consistent again
+            ExpireCalls(after);
+            // run handlers once Steam's queue is consistent again; one that throws must not take the others of this tick with it
+            foreach (Action a in after)
+            {
+                try { a(); }
+                catch (Exception ex) { System.Diagnostics.Debug.WriteLine("Steam handler failed: " + ex); }
+            }
         }
 
-        void HandleCallCompleted(IntPtr param, List<Action> after)
+        /// <summary>Calls that Steam has not answered for CallTimeoutMs complete as failed; the entry is removed.</summary>
+        void ExpireCalls(List<Action> after)
         {
+            int now = Environment.TickCount;
+            List<ulong> late = null;
+            foreach (KeyValuePair<ulong, PendingCall> kv in pending)
+                if (unchecked(now - kv.Value.Deadline) >= 0)
+                {
+                    if (late == null) late = new List<ulong>();
+                    late.Add(kv.Key);
+                }
+            if (late != null)
+                foreach (ulong call in late)
+                {
+                    PendingCall pc = pending[call];
+                    pending.Remove(call);
+                    Action<byte[], bool> handler = pc.Handler;
+                    after.Add(delegate { handler(new byte[0], false); });
+                    if (pc.Late != null)
+                    {
+                        pc.Deadline = now + AbandonedKeepMs;
+                        abandoned[call] = pc;
+                    }
+                }
+
+            if (abandoned.Count == 0) return;
+            List<ulong> forget = null;
+            foreach (KeyValuePair<ulong, PendingCall> kv in abandoned)
+                if (unchecked(now - kv.Value.Deadline) >= 0)
+                {
+                    if (forget == null) forget = new List<ulong>();
+                    forget.Add(kv.Key);
+                }
+            if (forget != null)
+                foreach (ulong call in forget) abandoned.Remove(call);
+        }
+
+        /// <summary>
+        /// Remembers the handler of an API call. Call 0 (k_uAPICallInvalid: Steam is offline) will never be answered: it fails on the
+        /// next pump tick, not inside the caller.
+        /// </summary>
+        void AddPending(ulong call, Action<byte[], bool> handler, Action<byte[], bool> late)
+        {
+            if (call == 0)
+            {
+                deferred.Add(delegate { handler(new byte[0], false); });
+                return;
+            }
+            PendingCall pc = new PendingCall();
+            pc.Handler = handler;
+            pc.Late = late;
+            pc.Deadline = Environment.TickCount + CallTimeoutMs;
+            pending[call] = pc;
+        }
+
+        void HandleCallCompleted(IntPtr param, int paramSize, List<Action> after)
+        {
+            if (paramSize < 16) return;
             // SteamAPICallCompleted_t { uint64 call; int callback; uint32 size; }
             ulong call = (ulong)Marshal.ReadInt64(param, 0);
             int callbackId = Marshal.ReadInt32(param, 8);
             int size = Marshal.ReadInt32(param, 12);
-            Action<byte[], bool> handler;
-            if (!pending.TryGetValue(call, out handler)) return;
-            pending.Remove(call);
+            PendingCall pc;
+            bool isLate = false;
+            if (pending.TryGetValue(call, out pc)) pending.Remove(call);
+            else if (abandoned.TryGetValue(call, out pc)) { abandoned.Remove(call); isLate = true; }
+            else return;
+            Action<byte[], bool> handler = isLate ? pc.Late : pc.Handler;
+            if (handler == null) return;
+            if (size < 0 || size > 1 << 20)
+            {
+                after.Add(delegate { handler(new byte[0], false); });
+                return;
+            }
 
             IntPtr buffer = Marshal.AllocHGlobal(Math.Max(size, 8));
             try
@@ -611,6 +731,7 @@ namespace ChessGame
             if (id == CbLobbyChatUpdate)
             {
                 // LobbyChatUpdate_t { u64 lobby; u64 userChanged; u64 makingChange; u32 stateChange; }
+                if (size < 28) return;
                 ulong lobby = (ulong)Marshal.ReadInt64(param, 0);
                 ulong who = (ulong)Marshal.ReadInt64(param, 8);
                 uint state = (uint)Marshal.ReadInt32(param, 24);
@@ -620,6 +741,7 @@ namespace ChessGame
             else if (id == CbLobbyChatMsg)
             {
                 // LobbyChatMsg_t { u64 lobby; u64 user; u8 type; u32 chatId; }
+                if (size < 24) return;
                 ulong lobby = (ulong)Marshal.ReadInt64(param, 0);
                 int chatId = Marshal.ReadInt32(param, 20);
                 ulong sender = 0;
@@ -661,13 +783,25 @@ namespace ChessGame
         public void CreateLobby(int maxMembers, Action<bool, ulong> done)
         {
             ulong call = SteamNative.SteamAPI_ISteamMatchmaking_CreateLobby(matchmaking, LobbyTypePublic, maxMembers);
-            pending[call] = delegate(byte[] data, bool ok)
+            AddPending(call, delegate(byte[] data, bool ok)
             {
-                // LobbyCreated_t { int result; u64 lobby; }  (the u64 sits at offset 8 or 4 depending on struct packing)
-                if (!ok || data.Length < 12 || BitConverter.ToInt32(data, 0) != 1) { done(false, 0); return; }
-                ulong id = BitConverter.ToUInt64(data, data.Length >= 16 ? 8 : 4);
-                done(id != 0, id);
-            };
+                ulong id;
+                done(ParseLobbyCreated(data, ok, out id), id);
+            }, delegate(byte[] data, bool ok)
+            {
+                // the room was given up as failed, but Steam did create the lobby: do not stay inside a lobby nobody manages
+                ulong id;
+                if (ParseLobbyCreated(data, ok, out id)) LeaveLobby(id);
+            });
+        }
+
+        /// <summary>LobbyCreated_t { int result; u64 lobby; }  (the u64 sits at offset 8 or 4 depending on struct packing)</summary>
+        static bool ParseLobbyCreated(byte[] data, bool ok, out ulong id)
+        {
+            id = 0;
+            if (!ok || data.Length < 12 || BitConverter.ToInt32(data, 0) != 1) return false;
+            id = BitConverter.ToUInt64(data, data.Length >= 16 ? 8 : 4);
+            return id != 0;
         }
 
         public void FindLobbies(Action<List<LobbyInfo>> done)
@@ -677,7 +811,7 @@ namespace ChessGame
             SteamNative.SteamAPI_ISteamMatchmaking_AddRequestLobbyListDistanceFilter(matchmaking, 3 /* worldwide */);
             SteamNative.SteamAPI_ISteamMatchmaking_AddRequestLobbyListResultCountFilter(matchmaking, 50);
             ulong call = SteamNative.SteamAPI_ISteamMatchmaking_RequestLobbyList(matchmaking);
-            pending[call] = delegate(byte[] data, bool ok)
+            AddPending(call, delegate(byte[] data, bool ok)
             {
                 List<LobbyInfo> list = new List<LobbyInfo>();
                 if (ok && data.Length >= 4)
@@ -688,7 +822,7 @@ namespace ChessGame
                         ulong id = SteamNative.SteamAPI_ISteamMatchmaking_GetLobbyByIndex(matchmaking, i);
                         if (id == 0) continue;
                         ulong owner = SteamNative.SteamAPI_ISteamMatchmaking_GetLobbyOwner(matchmaking, id);
-                        if (owner == MySteamId && !ListOwnLobbies) continue;   // our own lobby may be listed too
+                        if (owner == MySteamId) continue;   // our own lobby may be listed too
                         LobbyInfo info = new LobbyInfo();
                         info.Id = id;
                         info.IsFriend = owner != 0 && SteamNative.SteamAPI_ISteamFriends_GetFriendRelationship(friends, owner) == RelationshipFriend;
@@ -704,17 +838,26 @@ namespace ChessGame
                     }
                 }
                 done(list);
-            };
+            }, null);
         }
 
         public void JoinLobby(ulong lobby, Action<bool> done)
         {
             ulong call = SteamNative.SteamAPI_ISteamMatchmaking_JoinLobby(matchmaking, lobby);
-            pending[call] = delegate(byte[] data, bool ok)
+            AddPending(call, delegate(byte[] data, bool ok)
             {
-                // LobbyEnter_t { u64 lobby; u32 permissions; bool locked; u32 response; }  response 1 = success
-                done(ok && data.Length >= 20 && BitConverter.ToInt32(data, 16) == 1);
-            };
+                done(JoinSucceeded(data, ok));
+            }, delegate(byte[] data, bool ok)
+            {
+                // given up as failed, but Steam let us in after all: leave again
+                if (JoinSucceeded(data, ok)) LeaveLobby(lobby);
+            });
+        }
+
+        /// <summary>LobbyEnter_t { u64 lobby; u32 permissions; bool locked; u32 response; }  response 1 = success</summary>
+        static bool JoinSucceeded(byte[] data, bool ok)
+        {
+            return ok && data.Length >= 20 && BitConverter.ToInt32(data, 16) == 1;
         }
 
         public void LeaveLobby(ulong lobby)

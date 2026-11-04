@@ -26,8 +26,6 @@ namespace ChessGame
     public sealed class RequestStrip : Control
     {
         const int MaxShown = 4;
-        const TextFormatFlags Wrap = TextFormatFlags.WordBreak | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix
-            | TextFormatFlags.Left | TextFormatFlags.Top;
 
         sealed class Slot
         {
@@ -50,9 +48,6 @@ namespace ChessGame
         int hotItem = -1, hotButton = -1;       // button under the mouse: item index and 0 = yes / 1 = no
         int downItem = -1, downButton = -1;     // button held down
 
-        /// <summary>The height this strip wants changed (also applied to Height); use it when the parent does not auto-size.</summary>
-        public event Action<int> HeightWanted;
-
         public RequestStrip()
         {
             // not Selectable: clicking a button must not steal the keyboard from the board
@@ -60,6 +55,7 @@ namespace ChessGame
                 | ControlStyles.ResizeRedraw, true);
             SetStyle(ControlStyles.Selectable, false);
             TabStop = false;
+            ThemeWatch.Attach(this, delegate { Invalidate(); });
             Visible = false;
             Height = 0;
         }
@@ -98,55 +94,6 @@ namespace ChessGame
 
         // ------------------------------------------------------------ layout
 
-        static Bitmap measureBmp;
-        static Graphics measureG;
-
-        /// <summary>Measured on a bitmap DC like the one painting uses: the screen DC wraps a pixel or two differently.</summary>
-        static Size MeasureText(string text, Font font, int width)
-        {
-            if (measureG == null)
-            {
-                measureBmp = new Bitmap(1, 1);
-                measureG = Graphics.FromImage(measureBmp);
-            }
-            return TextRenderer.MeasureText(measureG, text, font, new Size(width, 0), Wrap);
-        }
-
-        /// <summary>GDI cuts a single word wider than the line with "..."; break it here so that nothing is ever clipped.</summary>
-        static string BreakLongWords(string text, Font font, int width)
-        {
-            StringBuilder sb = null;
-            int pos = 0;
-            int i = 0;
-            while (i < text.Length)
-            {
-                if (char.IsWhiteSpace(text[i])) { i++; continue; }
-                int start = i;
-                while (i < text.Length && !char.IsWhiteSpace(text[i])) i++;
-                if (i - start < 4 || MeasureText(text.Substring(start, i - start), font, 10000).Width <= width) continue;
-
-                if (sb == null) sb = new StringBuilder(text.Length + 8);
-                sb.Append(text, pos, start - pos);
-                int at = start;
-                while (at < i)
-                {
-                    int lo = 1, hi = i - at;   // the longest piece that still fits (at least one char)
-                    while (lo < hi)
-                    {
-                        int mid = (lo + hi + 1) / 2;
-                        if (MeasureText(text.Substring(at, mid), font, 10000).Width <= width) lo = mid; else hi = mid - 1;
-                    }
-                    sb.Append(text, at, lo);
-                    at += lo;
-                    if (at < i) sb.Append('\n');
-                }
-                pos = i;
-            }
-            if (sb == null) return text;
-            sb.Append(text, pos, text.Length - pos);
-            return sb.ToString();
-        }
-
         Plan BuildLayout(int width)
         {
             Plan lay = new Plan();
@@ -164,8 +111,8 @@ namespace ChessGame
                 Slot s = new Slot();
                 s.Item = it;
                 string text = (it.Text ?? "").Trim();
-                s.Shown = BreakLongWords(text.Length == 0 ? " " : text, body, textW);
-                Size ts = MeasureText(s.Shown, body, textW);
+                s.Shown = TextWrap.BreakLongWords(text.Length == 0 ? " " : text, body, textW, 4);
+                Size ts = TextWrap.MeasureText(s.Shown, body, textW);
 
                 int top = y;
                 s.TextR = new Rectangle(padX, top + padTop, textW, ts.Height + Ui.S(2));
@@ -176,7 +123,7 @@ namespace ChessGame
                 if (two)
                 {
                     int half = (inner - btnGap) / 2;
-                    int need = Math.Max(MeasureText(yes, btnFont, 10000).Width, MeasureText(it.NoText, Ui.Font(9.5f), 10000).Width) + Ui.S(24);
+                    int need = Math.Max(TextWrap.MeasureText(yes, btnFont, 10000).Width, TextWrap.MeasureText(it.NoText, Ui.Font(9.5f), 10000).Width) + Ui.S(24);
                     if (need <= half)
                     {
                         s.YesR = new Rectangle(padX, by, half, btnH);
@@ -193,7 +140,7 @@ namespace ChessGame
                 }
                 else
                 {
-                    int w = Math.Min(inner, Math.Max(Ui.S(120), MeasureText(yes, btnFont, 10000).Width + Ui.S(32)));
+                    int w = Math.Min(inner, Math.Max(Ui.S(120), TextWrap.MeasureText(yes, btnFont, 10000).Width + Ui.S(32)));
                     s.YesR = new Rectangle(padX, by, w, btnH);
                     s.NoR = Rectangle.Empty;
                     by += btnH;
@@ -207,7 +154,7 @@ namespace ChessGame
             lay.More = items.Count - shown;
             if (lay.More > 0)
             {
-                int h = MeasureText("Ag", Ui.Font(9f), 10000).Height;
+                int h = TextWrap.MeasureText("Ag", Ui.Font(9f), 10000).Height;
                 lay.MoreR = new Rectangle(padX, y, textW, h + Ui.S(2));
                 y += lay.MoreR.Height + Ui.S(2);
             }
@@ -222,7 +169,6 @@ namespace ChessGame
         {
             layout = BuildLayout(WorkWidth);
             if (Height != layout.Height) Height = layout.Height;
-            if (HeightWanted != null) HeightWanted(layout.Height);
         }
 
         public override Size GetPreferredSize(Size proposedSize)
@@ -239,10 +185,8 @@ namespace ChessGame
             if (Width > 0 && (layout == null || layout.Width != Width))
             {
                 // a new width wraps differently, which changes the height; the width itself stays, so this cannot loop
-                Plan old = layout;
                 layout = BuildLayout(Width);
                 if (Height != layout.Height) Height = layout.Height;
-                if ((old == null || old.Height != layout.Height) && HeightWanted != null) HeightWanted(layout.Height);
             }
         }
 
@@ -364,18 +308,5 @@ namespace ChessGame
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
         }
 
-        protected override void OnHandleCreated(EventArgs e)
-        {
-            base.OnHandleCreated(e);
-            Theme.Changed += OnThemeChanged;
-        }
-
-        protected override void OnHandleDestroyed(EventArgs e)
-        {
-            Theme.Changed -= OnThemeChanged;
-            base.OnHandleDestroyed(e);
-        }
-
-        void OnThemeChanged() { if (!IsDisposed) Invalidate(); }
     }
 }

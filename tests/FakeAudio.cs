@@ -7,8 +7,14 @@ sealed class FakeCapture : IAudioCapture
 {
     public bool Started;
     public bool Disposed;
+    volatile bool failed;
 
     public event Action<short[]> FrameCaptured;
+
+    public bool Failed { get { return failed; } }
+
+    /// <summary>Pretends the device died by itself (headset unplugged).</summary>
+    public void Fail() { failed = true; }
 
     public bool Start(out string error) { error = null; Started = true; return true; }
     public void Stop() { Started = false; }
@@ -39,6 +45,12 @@ sealed class FakePlayback : IAudioPlayback
     public readonly List<short[]> Frames = new List<short[]>();
     public bool Started;
     public bool Disposed;
+    volatile bool failed;
+
+    public bool Failed { get { return failed; } }
+
+    /// <summary>Pretends the device died by itself (headset unplugged).</summary>
+    public void Fail() { failed = true; }
 
     public bool Start(out string error) { error = null; Started = true; return true; }
     public void Stop() { Started = false; }

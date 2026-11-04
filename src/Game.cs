@@ -50,8 +50,9 @@ namespace ChessGame
         /// <summary>Starts a fresh game from an arbitrary position.</summary>
         public void LoadFen(string fen)
         {
+            Position loaded = Position.FromFen(fen);   // an unusable FEN throws here, before anything of the game is touched
             startFen = fen;
-            Pos = Position.FromFen(fen);
+            Pos = loaded;
             moves.Clear();
             undos.Clear();
             san.Clear();

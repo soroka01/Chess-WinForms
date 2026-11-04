@@ -9,6 +9,6 @@ if not exist "%CSC%" set CSC=%WINDIR%\Microsoft.NET\Framework\v4.0.30319\csc.exe
 if not exist tests\bin mkdir tests\bin
 "%CSC%" /nologo /optimize+ /target:exe /main:NetTests /out:tests\bin\NetTests.exe ^
     /reference:System.dll /reference:System.Core.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll ^
-    tests\NetTests.cs tests\FakeLobby.cs tests\FakeAudio.cs src\*.cs
+    tests\NetTests.cs tests\SettingsTests.cs tests\TestKit.cs tests\FakeLobby.cs tests\FakeAudio.cs src\*.cs
 if errorlevel 1 exit /b 1
 tests\bin\NetTests.exe %*

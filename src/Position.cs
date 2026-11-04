@@ -165,8 +165,15 @@ namespace ChessGame
             return FromFen(StartFen);
         }
 
+        /// <summary>
+        /// Reads a FEN. Anything that cannot be a position of a real game (a short row, no king, a pawn on the back rank, an
+        /// impossible en passant square ...) throws FormatException. Castling rights without the king and rook at home, and an
+        /// en passant square that no pawn could use, are dropped, so that the same position hashes the same whether it was loaded
+        /// or reached by playing (the repetition count depends on it).
+        /// </summary>
         public static Position FromFen(string fen)
         {
+            if (fen == null) throw new FormatException("Empty FEN");
             string[] parts = fen.Trim().Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
             if (parts.Length < 1) throw new FormatException("Empty FEN");
             Position p = new Position();
@@ -180,21 +187,51 @@ namespace ChessGame
                     if (c >= '1' && c <= '8') { f += c - '0'; continue; }
                     int idx = "PNBRQK".IndexOf(char.ToUpper(c));
                     if (idx < 0 || f > 7) throw new FormatException("Bad FEN piece");
+                    if (idx + 1 == Pc.Pawn && (r == 0 || r == 7)) throw new FormatException("A pawn on the first or last rank");
                     p.Sq[r * 8 + f] = char.IsUpper(c) ? idx + 1 : -(idx + 1);
                     f++;
                 }
+                if (f != 8) throw new FormatException("Bad FEN row width");
             }
-            p.WhiteToMove = parts.Length < 2 || parts[1] == "w";
-            if (parts.Length > 2)
+            int whiteKings = 0, blackKings = 0;
+            for (int s = 0; s < 64; s++)
             {
-                if (parts[2].IndexOf('K') >= 0) p.Castle |= CastleWK;
-                if (parts[2].IndexOf('Q') >= 0) p.Castle |= CastleWQ;
-                if (parts[2].IndexOf('k') >= 0) p.Castle |= CastleBK;
-                if (parts[2].IndexOf('q') >= 0) p.Castle |= CastleBQ;
+                if (p.Sq[s] == Pc.King) whiteKings++;
+                else if (p.Sq[s] == -Pc.King) blackKings++;
             }
-            if (parts.Length > 3 && parts[3] != "-") p.Ep = Sqr.Parse(parts[3]);
-            if (parts.Length > 4) int.TryParse(parts[4], out p.Half);
-            if (parts.Length > 5) int.TryParse(parts[5], out p.Full);
+            if (whiteKings != 1 || blackKings != 1) throw new FormatException("Each side needs exactly one king");
+
+            if (parts.Length > 1 && parts[1] != "w" && parts[1] != "b") throw new FormatException("Bad FEN side to move");
+            p.WhiteToMove = parts.Length < 2 || parts[1] == "w";
+
+            if (parts.Length > 2 && parts[2] != "-")
+            {
+                foreach (char c in parts[2])
+                    if ("KQkq".IndexOf(c) < 0) throw new FormatException("Bad FEN castling field");
+                if (parts[2].IndexOf('K') >= 0 && p.Sq[4] == Pc.King && p.Sq[7] == Pc.Rook) p.Castle |= CastleWK;
+                if (parts[2].IndexOf('Q') >= 0 && p.Sq[4] == Pc.King && p.Sq[0] == Pc.Rook) p.Castle |= CastleWQ;
+                if (parts[2].IndexOf('k') >= 0 && p.Sq[60] == -Pc.King && p.Sq[63] == -Pc.Rook) p.Castle |= CastleBK;
+                if (parts[2].IndexOf('q') >= 0 && p.Sq[60] == -Pc.King && p.Sq[56] == -Pc.Rook) p.Castle |= CastleBQ;
+            }
+
+            if (parts.Length > 3 && parts[3] != "-")
+            {
+                // the square behind a pawn that has just made a double step: rank 3 after White's, rank 6 after Black's
+                string e = parts[3];
+                if (e.Length != 2 || e[0] < 'a' || e[0] > 'h' || e[1] != (p.WhiteToMove ? '6' : '3'))
+                    throw new FormatException("Bad FEN en passant square");
+                int ep = Sqr.Parse(e);
+                int pushed = p.WhiteToMove ? ep - 8 : ep + 8;
+                int pusherPawn = p.WhiteToMove ? -Pc.Pawn : Pc.Pawn;
+                int capturer = p.WhiteToMove ? Pc.Pawn : -Pc.Pawn;
+                int file = pushed & 7;
+                bool usable = p.Sq[pushed] == pusherPawn && p.Sq[ep] == 0
+                    && ((file > 0 && p.Sq[pushed - 1] == capturer) || (file < 7 && p.Sq[pushed + 1] == capturer));
+                if (usable) p.Ep = ep;
+            }
+
+            if (parts.Length > 4 && (!int.TryParse(parts[4], out p.Half) || p.Half < 0)) throw new FormatException("Bad FEN half-move clock");
+            if (parts.Length > 5 && (!int.TryParse(parts[5], out p.Full) || p.Full < 1)) throw new FormatException("Bad FEN move number");
             p.FindKings();
             p.Hash = p.ComputeHash();
             return p;

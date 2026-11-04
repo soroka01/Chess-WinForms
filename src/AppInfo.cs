@@ -9,7 +9,7 @@ namespace ChessGame
     static class AppInfo
     {
         /// <summary>This build, as major.minor.patch. A release on GitHub is tagged "v" + this number.</summary>
-        public const string Version = "1.1.0";
+        public const string Version = "1.1.1";
 
         public const string Repository = "soroka01/Chess-WinForms";
         public const string ReleasesUrl = "https://github.com/" + Repository + "/releases";
